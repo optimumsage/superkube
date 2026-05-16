@@ -38,6 +38,18 @@ cd superkube
 make install   # builds superkube + sk symlink into $GOBIN
 ```
 
+### Upgrade
+
+```sh
+sk upgrade                  # check latest release, confirm, install in place
+sk upgrade --check          # just report whether an upgrade is available
+sk upgrade --version v0.3.0 # pin a specific release
+sk upgrade --yes            # skip the confirmation prompt
+sk upgrade --force          # reinstall even if already up to date
+```
+
+`sk upgrade` resolves the latest release from GitHub, downloads the matching `darwin`/`linux` × `amd64`/`arm64` tarball, verifies the published `checksums.txt` when present, and atomically replaces the running binary in place (resolving any `sk → superkube` symlink). The `--yes` and `--plain` global flags apply: non-TTY callers must pass `--yes`. If the install directory isn't writable you'll get a "permission denied" error pointing you at `sudo` or a fresh `install.sh` run.
+
 ### Requirements
 
 | Tool | Version | Required? |
@@ -241,6 +253,7 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 | `sk audit log [--since 1h] [-f]` / `audit path` | view or locate the audit log | n/a |
 | `sk config init [--force]` / `config path` | manage `~/.config/superkube/config.yaml` | n/a |
 | `sk version` | binary, Go, platform, kubectl, AI provider versions | n/a |
+| `sk upgrade [--check\|--force\|--version v…]` | self-upgrade to the latest GitHub release; verifies checksums, atomic in-place replace | confirm |
 | `sk completion bash\|zsh\|fish` | shell completion (cobra built-in) | n/a |
 
 ---
