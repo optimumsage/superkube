@@ -14,11 +14,26 @@ package picker
 
 import (
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// marqueeInterval is the redraw cadence for the horizontal scroll on the
+// selected row. Slow enough that the eye can track each shift, fast enough that
+// long ARN-style context names don't feel sluggish.
+const marqueeInterval = 220 * time.Millisecond
+
+// marqueeSeparator is the visible gap stitched between the end and start of a
+// scrolling label so the user can tell when a wrap has happened.
+const marqueeSeparator = "   ·   "
+
+// marqueeTickMsg is the periodic redraw signal that advances the marquee
+// offset. We use a struct (rather than time.Time) so it's trivially identified
+// in the Update switch.
+type marqueeTickMsg struct{}
 
 // Item is one selectable row. Label is what the user sees; Value is what gets
 // returned. Hint is rendered subtly to the right of the label (e.g. "current").
@@ -64,6 +79,11 @@ type model struct {
 	top    int // viewport top into filtered
 	w, h   int
 
+	// marqueeOff is the rune-offset into the selected row's scrolling text.
+	// Reset to 0 whenever the cursor moves or the filter changes so the user
+	// always sees the start of the newly-focused label first.
+	marqueeOff int
+
 	picked    bool
 	cancelled bool
 	result    string
@@ -91,7 +111,16 @@ func newModel(cfg Config) model {
 	return m
 }
 
-func (m model) Init() tea.Cmd { return textinput.Blink }
+func (m model) Init() tea.Cmd {
+	return tea.Batch(textinput.Blink, marqueeTickCmd())
+}
+
+// marqueeTickCmd schedules the next marquee tick. We reschedule from each
+// tickMsg handler so the cadence stays consistent even if the program is
+// briefly suspended (window resize, etc.).
+func marqueeTickCmd() tea.Cmd {
+	return tea.Tick(marqueeInterval, func(time.Time) tea.Msg { return marqueeTickMsg{} })
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -99,6 +128,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.w, m.h = msg.Width, msg.Height
 		m.clampCursor()
 		return m, nil
+
+	case marqueeTickMsg:
+		m.marqueeOff++
+		return m, marqueeTickCmd()
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -115,26 +148,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down", "ctrl+n", "ctrl+j":
 			m.cursor++
 			m.clampCursor()
+			m.marqueeOff = 0
 			return m, nil
 		case "up", "ctrl+p", "ctrl+k":
 			m.cursor--
 			m.clampCursor()
+			m.marqueeOff = 0
 			return m, nil
 		case "pgdown":
 			m.cursor += m.visibleRows()
 			m.clampCursor()
+			m.marqueeOff = 0
 			return m, nil
 		case "pgup":
 			m.cursor -= m.visibleRows()
 			m.clampCursor()
+			m.marqueeOff = 0
 			return m, nil
 		case "home":
 			m.cursor = 0
 			m.clampCursor()
+			m.marqueeOff = 0
 			return m, nil
 		case "end":
 			m.cursor = len(m.filtered) - 1
 			m.clampCursor()
+			m.marqueeOff = 0
 			return m, nil
 		}
 
@@ -148,6 +187,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.applyFilter()
 			m.cursor = 0
 			m.top = 0
+			m.marqueeOff = 0
 		}
 		return m, cmd
 	}
@@ -218,12 +258,14 @@ func (m model) current() (Item, bool) {
 	return m.filtered[m.cursor], true
 }
 
-// boxWidth picks a sensible picker width given the terminal. We cap at 72 so
-// the focused view stays readable on ultra-wide terminals.
+// boxWidth picks the picker width given the terminal. Cap raised from the
+// original 72 → 120 so realistic kubeconfig names (EKS ARNs, GKE FQDNs) stop
+// getting cropped mid-name on a normal 120-column window. Rows that *still*
+// don't fit at the cap fall back to the marquee scroller in renderRow.
 func (m model) boxWidth() int {
 	w := m.w - 4
-	if w > 72 {
-		w = 72
+	if w > 120 {
+		w = 120
 	}
 	if w < 24 {
 		w = 24
@@ -276,7 +318,7 @@ func (m model) View() string {
 		for i := m.top; i < end; i++ {
 			it := m.filtered[i]
 			selected := i == m.cursor
-			b.WriteString(renderRow(it, selected, w-2))
+			b.WriteString(renderRow(it, selected, w-2, m.marqueeOff))
 			b.WriteByte('\n')
 		}
 		// Pad to keep the footer at a stable Y.
@@ -303,31 +345,68 @@ func (m model) View() string {
 	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, box)
 }
 
-func renderRow(it Item, selected bool, width int) string {
+func renderRow(it Item, selected bool, width int, marqueeOff int) string {
 	prefix := "  "
 	if selected {
 		prefix = pointerStyle.Render("▸ ")
 	}
-	label := it.Label
 	hint := ""
 	if it.Hint != "" {
 		hint = " " + subtleStyle.Render("("+it.Hint+")")
 	}
-	left := prefix + label + hint
-	if lipgloss.Width(left) > width {
-		// Truncate from the left of the label so the trailing useful bits
-		// (often a unique suffix) stay visible.
-		runes := []rune(label)
-		over := lipgloss.Width(left) - width
-		if over < len(runes) {
-			label = "…" + string(runes[over+1:])
-			left = prefix + label + hint
+	prefixW := lipgloss.Width(prefix)
+	hintW := lipgloss.Width(hint)
+	// Budget for the label proper. prefixW already accounts for the cursor
+	// glyph + trailing space; the hint hugs the right of the label.
+	labelBudget := width - prefixW - hintW
+	if labelBudget < 1 {
+		labelBudget = 1
+	}
+
+	label := it.Label
+	if lipgloss.Width(label) > labelBudget {
+		if selected {
+			// Selected row: marquee instead of truncating. The user sees the
+			// whole name eventually rather than losing the head/tail.
+			label = marqueeWindow(it.Label, labelBudget, marqueeOff)
+		} else {
+			// Non-selected rows: keep static behavior. Truncate from the
+			// head so the trailing (usually unique) suffix stays visible.
+			runes := []rune(it.Label)
+			over := lipgloss.Width(it.Label) - (labelBudget - 1) // room for the ellipsis
+			if over > 0 && over < len(runes) {
+				label = "…" + string(runes[over:])
+			}
 		}
 	}
+	left := prefix + label + hint
 	if selected {
 		return selectedRowStyle.Render(left)
 	}
 	return left
+}
+
+// marqueeWindow returns a fixed-width slice of label as if it were scrolling
+// horizontally with offset `off`. The scrolled text wraps around with
+// marqueeSeparator between repeats so the user can tell when one pass ends and
+// the next begins. The offset is taken modulo the cycle length so it can grow
+// unbounded across ticks without us having to clamp on every event.
+//
+// We operate on runes, not bytes — context names are usually ASCII but we
+// don't want to be wrong for a UTF-8 name.
+func marqueeWindow(label string, width, off int) string {
+	if label == "" || width <= 0 {
+		return ""
+	}
+	cycle := label + marqueeSeparator
+	runes := []rune(cycle)
+	n := len(runes)
+	off = ((off % n) + n) % n
+	out := make([]rune, 0, width)
+	for i := 0; i < width; i++ {
+		out = append(out, runes[(off+i)%n])
+	}
+	return string(out)
 }
 
 func itoa(n int) string {

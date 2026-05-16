@@ -18,10 +18,14 @@ func newCtxCmd() *cobra.Command {
 		Short: "List or switch kubeconfig contexts",
 		Long: `Without arguments, prints the available contexts (or opens a fuzzy picker
 on a TTY). With a name, switches to that context. With "-", switches back to
-the previous context.`,
+the previous context.
+
+Subcommands:
+  clean   Remove stale or non-operational contexts from kubeconfig.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runCtx,
 	}
+	cmd.AddCommand(newCtxCleanCmd())
 	return cmd
 }
 
