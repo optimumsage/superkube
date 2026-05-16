@@ -84,18 +84,35 @@ func runAIDiagnostic(cmd *cobra.Command, resource, templateName string) error {
 // namespace from --namespace is honored; without it kubectl uses the context's
 // default.
 func gatherDiagnostic(ctx context.Context, runner *kubectl.Runner, resource, resourceType, resourceName string) ai.PromptInputs {
+	return gatherDiagnosticNS(ctx, runner, resource, resourceType, resourceName, Flags.Namespace)
+}
+
+// gatherDiagnosticNS is the same as gatherDiagnostic but lets the caller pin
+// the namespace explicitly. The TUI uses this so each action runs against the
+// selected pod's actual namespace rather than --namespace.
+func gatherDiagnosticNS(ctx context.Context, runner *kubectl.Runner, resource, resourceType, resourceName, namespace string) ai.PromptInputs {
 	inputs := ai.PromptInputs{Resource: resource}
 	if !Flags.NoContext {
 		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: Flags.Context}
 		inputs.Context, _ = loader.CurrentContext()
-		inputs.Namespace, _ = loader.CurrentNamespace()
+		if namespace != "" {
+			inputs.Namespace = namespace
+		} else {
+			inputs.Namespace, _ = loader.CurrentNamespace()
+		}
 	}
-	describeOut, _ := captureKubectl(ctx, runner, kubectlNSArgs("describe", resourceType, resourceName))
-	eventsOut, _ := captureKubectl(ctx, runner, kubectlNSArgs(
+	withNS := func(parts ...string) []string {
+		if namespace == "" {
+			return parts
+		}
+		return append(parts, "-n", namespace)
+	}
+	describeOut, _ := captureKubectl(ctx, runner, withNS("describe", resourceType, resourceName))
+	eventsOut, _ := captureKubectl(ctx, runner, withNS(
 		"get", "events", "--sort-by=.lastTimestamp",
 		"--field-selector", "involvedObject.name="+resourceName,
 	))
-	logsOut, _ := captureKubectl(ctx, runner, kubectlNSArgs(
+	logsOut, _ := captureKubectl(ctx, runner, withNS(
 		"logs", resourceName, "--tail=200", "--all-containers=true", "--prefix=true",
 	))
 	inputs.Describe = describeOut

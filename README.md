@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="superkube" width="160" height="160"/>
+</p>
+
 # superkube
 
 A safer, prettier, AI-assisted wrapper around `kubectl`.
@@ -51,6 +55,8 @@ Run `sk version` to confirm everything's wired up.
 ```sh
 sk version                            # binary, kubectl, AI provider, all in one place
 sk ctx                                # fuzzy-pick a context
+sk ctx clean                          # tick contexts to remove (manual)
+sk ctx clean --auto                   # probe each context, drop unreachable ones
 sk ns kube-system                     # switch namespace
 sk get pods                           # styled header on a TTY, plain in a pipe
 sk get pods -w                        # live-refreshing table
@@ -162,6 +168,23 @@ sk ns kube-system       # switch namespace in the current context
 sk ns -                 # previous namespace
 ```
 
+### Cleaning up stale contexts (`sk ctx clean`)
+
+Kubeconfigs accumulate cruft — old clusters that have been deleted, ephemeral kind/minikube contexts, demos you cloned and never went back to. `sk ctx clean` prunes them safely.
+
+```sh
+sk ctx clean                         # manual: huh multi-select picker
+sk ctx clean --auto                  # probe every context, queue the dead ones
+sk ctx clean --auto --preview        # show what would be removed without touching kubeconfig
+sk ctx clean --auto --timeout 2s --concurrency 16
+sk ctx clean --keep-orphans          # leave cluster/user entries behind
+```
+
+- **Manual mode** (default) opens a multi-select picker over every context in the merged kubeconfig. Tick the ones you want gone, hit enter; the rest are untouched.
+- **Auto mode** issues one `/version` request per context (in parallel, up to `--concurrency`). Anything that fails — DNS error, TLS failure, connection refused, timeout — is queued for removal. The current context is shown in the probe table but never auto-pruned; you have to remove it through manual mode if you really want to.
+- The planned removal list is always printed and confirmed before kubeconfig is rewritten. `--yes` skips the final confirmation; `--preview` shows the list and exits without writing.
+- By default, cluster and auth-info entries that become unreferenced after the deletes are also pruned. Pass `--keep-orphans` to leave them.
+
 ### Audit log
 
 Every executed command is appended as JSON Lines to `${XDG_STATE_HOME:-$HOME/.local/state}/superkube/audit.log` (mode `0600`). Each entry includes the verb, full argv, kubectl context, namespace, exit code, duration, and the AI provider used for AI commands. The file rotates at 10 MB.
@@ -209,6 +232,7 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 | `sk top`, `sk edit` | passthrough | none |
 | `sk <anything-else>` | verbatim passthrough — krew plugins keep working | none |
 | `sk ctx [name\|-]` | list / switch / previous context (huh fuzzy picker on TTY) | n/a |
+| `sk ctx clean [--auto] [--preview]` | remove stale contexts: manual picker, or auto-probe `/version` and prune the unreachable ones | confirm |
 | `sk ns [name\|-]` | list / switch / previous namespace | n/a |
 | `sk tui` | full-screen pod browser with describe/logs/diagnose actions | n/a |
 | `sk ai explain "<q>"` | free-form AI question with current ctx/ns as light context | n/a |

@@ -4,12 +4,12 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
 	"github.com/optimumsage/superkube/internal/config"
 	"github.com/optimumsage/superkube/internal/kube"
 	"github.com/optimumsage/superkube/internal/ui"
+	"github.com/optimumsage/superkube/internal/ui/picker"
 )
 
 func newCtxCmd() *cobra.Command {
@@ -18,10 +18,14 @@ func newCtxCmd() *cobra.Command {
 		Short: "List or switch kubeconfig contexts",
 		Long: `Without arguments, prints the available contexts (or opens a fuzzy picker
 on a TTY). With a name, switches to that context. With "-", switches back to
-the previous context.`,
+the previous context.
+
+Subcommands:
+  clean   Remove stale or non-operational contexts from kubeconfig.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runCtx,
 	}
+	cmd.AddCommand(newCtxCleanCmd())
 	return cmd
 }
 
@@ -48,25 +52,24 @@ func runCtx(cmd *cobra.Command, args []string) error {
 			}
 			return nil
 		}
-		picked := current
-		options := make([]huh.Option[string], 0, len(contexts))
+		items := make([]picker.Item, 0, len(contexts))
 		for _, c := range contexts {
-			label := c
+			it := picker.Item{Label: c, Value: c}
 			if c == current {
-				label = c + " (current)"
+				it.Hint = "current"
 			}
-			options = append(options, huh.NewOption(label, c))
+			items = append(items, it)
 		}
-		form := huh.NewForm(huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Switch context").
-				Options(options...).
-				Value(&picked),
-		))
-		if err := form.Run(); err != nil {
+		picked, ok, err := picker.Run(picker.Config{
+			Title:       "Switch context",
+			Items:       items,
+			Current:     current,
+			Placeholder: "filter contexts…",
+		})
+		if err != nil {
 			return err
 		}
-		if picked == current {
+		if !ok || picked == "" || picked == current {
 			return nil
 		}
 		if err := loader.SwitchContext(picked, stateDir); err != nil {
