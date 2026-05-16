@@ -176,6 +176,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newLogsCmd())
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newTUICmd())
+	root.AddCommand(newUpgradeCmd())
 
 	// Force cobra to register its completion subcommand now (it's normally
 	// lazy on first Execute()), so our passthrough routing sees it as a known

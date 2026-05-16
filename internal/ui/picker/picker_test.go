@@ -5,27 +5,130 @@ import (
 	"testing"
 )
 
-func TestFuzzyMatch(t *testing.T) {
+func TestMatchScore_Matches(t *testing.T) {
 	cases := []struct {
 		hay, q string
 		want   bool
 	}{
+		// Subsequence cases inherited from the old fuzzyMatch matrix.
 		{"foobar", "fbar", true},
 		{"foobar", "fbr", true},
 		{"foobar", "foob", true},
-		{"foobar", "bo", false}, // no 'o' after the 'b' — order matters
+		{"foobar", "bo", false}, // no 'o' after the 'b' — order matters within a term
 		{"foobar", "xyz", false},
 		{"foobar", "obx", false},
 		{"prod-cluster-eu", "pe", true},
-		{"prod-cluster-eu", "deu", true}, // d ... e ... u all appear in order
+		{"prod-cluster-eu", "deu", true}, // d ... e ... u still in order
 		{"prod-cluster-eu", "xz", false},
 		{"", "x", false},
 		{"abc", "", true},
+
+		// Multi-term, unordered: fixes the "prod cluster"-vs-"cluster-1-prod"
+		// bug from the report.
+		{"cluster-1-prod", "prod cluster", true},
+		{"cluster-1-prod", "cluster prod", true},
+		{"cluster-1-prod", "prod missing", false},
+		// Whitespace-only filter behaves like empty.
+		{"anything", "   ", true},
 	}
 	for _, tc := range cases {
-		if got := fuzzyMatch(tc.hay, tc.q); got != tc.want {
-			t.Errorf("fuzzyMatch(%q,%q)=%v want %v", tc.hay, tc.q, got, tc.want)
+		_, got := matchScore(tc.hay, tc.q)
+		if got != tc.want {
+			t.Errorf("matchScore(%q,%q) matched=%v, want %v", tc.hay, tc.q, got, tc.want)
 		}
+	}
+}
+
+func TestMatchScore_PrioritizesSubstrings(t *testing.T) {
+	// A substring hit on `cluster-1-prod` must outrank a loose subsequence on
+	// `a-control-plane-extension` for the query "ctx". The bug report calls
+	// this out specifically: substrings should win.
+	subSeq, ok := matchScore("a-control-plane-extension", "ctx")
+	if !ok {
+		t.Fatal("subsequence ctx vs a-control-plane-extension should still match")
+	}
+	substring, ok := matchScore("project-ctx-1", "ctx")
+	if !ok {
+		t.Fatal("substring ctx vs project-ctx-1 should match")
+	}
+	if substring <= subSeq {
+		t.Errorf("substring score %d must beat subsequence score %d", substring, subSeq)
+	}
+}
+
+func TestMatchScore_StartOfStringBeatsMidString(t *testing.T) {
+	startHit, _ := matchScore("ctx-foo", "ctx")
+	midHit, _ := matchScore("foo-ctx", "ctx")
+	if startHit <= midHit {
+		t.Errorf("start-of-string score %d should beat mid-string %d", startHit, midHit)
+	}
+}
+
+func TestMatchScore_WordBoundaryBeatsInternal(t *testing.T) {
+	// `ctx` at a `-` boundary (`foo-ctx`) should outscore the same letters
+	// embedded inside another word (`foctxbar`).
+	boundary, _ := matchScore("foo-ctx", "ctx")
+	internal, _ := matchScore("foctxbar", "ctx")
+	if boundary <= internal {
+		t.Errorf("boundary-anchored score %d should beat internal %d", boundary, internal)
+	}
+}
+
+func TestApplyFilterSortsBestFirst(t *testing.T) {
+	cfg := Config{
+		Items: []Item{
+			{Label: "a-control-plane-extension", Value: "a-control-plane-extension"},
+			{Label: "project-ctx-1", Value: "project-ctx-1"},
+			{Label: "ctx-prod", Value: "ctx-prod"},
+		},
+	}
+	m := newModel(cfg)
+	m.input.SetValue("ctx")
+	m.applyFilter()
+	if len(m.filtered) == 0 {
+		t.Fatal("no matches for `ctx`")
+	}
+	// `ctx-prod` (start-of-string substring) should be first;
+	// `a-control-plane-extension` (loose subsequence) must come last.
+	if m.filtered[0].Value != "ctx-prod" {
+		t.Errorf("expected ctx-prod first, got %q", m.filtered[0].Value)
+	}
+	if m.filtered[len(m.filtered)-1].Value != "a-control-plane-extension" {
+		t.Errorf("expected a-control-plane-extension last, got %q", m.filtered[len(m.filtered)-1].Value)
+	}
+}
+
+func TestApplyFilterMultiTermUnordered(t *testing.T) {
+	cfg := Config{
+		Items: []Item{
+			{Label: "dev-cluster-1", Value: "dev-cluster-1"},
+			{Label: "cluster-1-prod", Value: "cluster-1-prod"}, // bug-report example
+			{Label: "prod-cluster-eu", Value: "prod-cluster-eu"},
+			{Label: "staging-cluster", Value: "staging-cluster"},
+		},
+	}
+	m := newModel(cfg)
+	m.input.SetValue("prod cluster")
+	m.applyFilter()
+
+	want := map[string]bool{
+		"cluster-1-prod":  true,
+		"prod-cluster-eu": true,
+	}
+	if len(m.filtered) != len(want) {
+		t.Fatalf("got %d matches, want %d: %#v", len(m.filtered), len(want), m.filtered)
+	}
+	for _, it := range m.filtered {
+		if !want[it.Value] {
+			t.Errorf("unexpected match %q", it.Value)
+		}
+	}
+
+	// And swapping the term order returns the same set.
+	m.input.SetValue("cluster prod")
+	m.applyFilter()
+	if len(m.filtered) != len(want) {
+		t.Errorf("multi-term should be order-independent: got %d, want %d", len(m.filtered), len(want))
 	}
 }
 

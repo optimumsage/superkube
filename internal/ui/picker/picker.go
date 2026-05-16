@@ -13,6 +13,7 @@
 package picker
 
 import (
+	"sort"
 	"strings"
 	"time"
 
@@ -196,30 +197,139 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) applyFilter() {
 	q := strings.TrimSpace(strings.ToLower(m.input.Value()))
+	m.filtered = m.filtered[:0]
 	if q == "" {
-		m.filtered = append(m.filtered[:0], m.cfg.Items...)
+		m.filtered = append(m.filtered, m.cfg.Items...)
 		return
 	}
-	m.filtered = m.filtered[:0]
-	for _, it := range m.cfg.Items {
+	type scoredItem struct {
+		item  Item
+		score int
+		order int // original position; used as a tiebreaker so identical scores stay stable
+	}
+	hits := make([]scoredItem, 0, len(m.cfg.Items))
+	for i, it := range m.cfg.Items {
 		hay := strings.ToLower(it.Label + " " + it.Value)
-		if fuzzyMatch(hay, q) {
-			m.filtered = append(m.filtered, it)
+		if s, ok := matchScore(hay, q); ok {
+			hits = append(hits, scoredItem{item: it, score: s, order: i})
 		}
+	}
+	// Best matches first; stable so equal scores keep input order.
+	sort.SliceStable(hits, func(i, j int) bool {
+		if hits[i].score != hits[j].score {
+			return hits[i].score > hits[j].score
+		}
+		return hits[i].order < hits[j].order
+	})
+	for _, h := range hits {
+		m.filtered = append(m.filtered, h.item)
 	}
 }
 
-// fuzzyMatch returns true if every rune of q appears in hay in order. This is
-// the same flavor of match fzf and huh use — "fbar" matches "foobar" or
-// "fooBar".
-func fuzzyMatch(hay, q string) bool {
-	i := 0
-	for _, r := range q {
-		idx := strings.IndexRune(hay[i:], r)
-		if idx < 0 {
-			return false
+// matchScore evaluates a haystack against a query and returns (score, matched).
+//
+// The query is split on whitespace into terms; each term must match the
+// haystack independently, but terms can appear in any order. This is what
+// lets `prod cluster` find `cluster-1-prod`.
+//
+// Per-term ranking:
+//   - Substring match scores highest (with extra credit for start-of-string
+//     and word-boundary anchors).
+//   - Subsequence match (every rune of the term appears in order) scores
+//     lower, with bonuses for word-boundary chars and consecutive runs.
+//
+// We deliberately do NOT hard-filter weak subsequence matches: fzf-style UX is
+// "show everything, best first." Pathological matches still appear but sit
+// below the substring hits.
+func matchScore(hay, query string) (int, bool) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return 0, true
+	}
+	total := 0
+	for _, term := range strings.Fields(query) {
+		s, ok := scoreTerm(hay, term)
+		if !ok {
+			return 0, false
 		}
-		i += idx + 1
+		total += s
+	}
+	return total, true
+}
+
+// scoreTerm scores a single (already-lowercased) term against hay. The bool
+// indicates whether the term is present at all; a low or negative score is
+// still a match (a weak one). We separate "found" from "score" so a sprawling
+// subsequence ranks below substring hits without being filtered out — that's
+// the fzf-style "show everything, best first" approach the bug report asks
+// for.
+func scoreTerm(hay, term string) (int, bool) {
+	if term == "" {
+		return 0, true
+	}
+	// Substring is the strongest signal. Adding hefty bonuses here is what
+	// pushes `cluster-1-prod` ahead of `a-control-plane-extension` when the
+	// user types `prod`.
+	if i := strings.Index(hay, term); i >= 0 {
+		score := 1000
+		switch {
+		case i == 0:
+			score += 500 // start-of-string is the best possible anchor
+		case isBoundaryByte(hay[i-1]):
+			score += 300
+		}
+		score -= i // earlier matches win minor ties
+		return score, true
+	}
+	return subsequenceScore(hay, term)
+}
+
+// subsequenceScore reports whether every rune of term appears in hay in
+// order, and returns a relative quality score for ranking. Bonuses for
+// matches at word boundaries and consecutive runs; gap penalty for matches
+// far apart. Scores can legitimately be negative (a very sparse match) —
+// callers should use the bool, not score sign, to test for a match.
+//
+// The byte-position helpers below assume the haystack is ASCII, which holds
+// for kubeconfig contexts and namespaces (RFC 1123 + ARN-shaped names). A
+// stray UTF-8 multibyte previous byte would be treated as a boundary, which
+// is a benign false positive for scoring purposes.
+func subsequenceScore(hay, term string) (int, bool) {
+	score := 0
+	prev := -2 // sentinel: -2 ensures the first match never registers as "consecutive"
+	hi := 0
+	for _, r := range term {
+		idx := strings.IndexRune(hay[hi:], r)
+		if idx < 0 {
+			return 0, false
+		}
+		absIdx := hi + idx
+		if absIdx == 0 || isBoundaryByte(hay[absIdx-1]) {
+			score += 30
+		}
+		if absIdx == prev+1 {
+			score += 20
+		}
+		// Gap penalty — small, so a single skipped char isn't fatal but a
+		// long jump across the string costs a lot.
+		score -= absIdx - hi
+		prev = absIdx
+		hi = absIdx + 1
+	}
+	return score, true
+}
+
+// isBoundaryByte reports whether b counts as a word-boundary character. A
+// match whose previous byte is a boundary (or which is the first byte) is
+// treated as anchored to a "word start" for scoring.
+func isBoundaryByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z':
+		return false
+	case b >= 'A' && b <= 'Z':
+		return false
+	case b >= '0' && b <= '9':
+		return false
 	}
 	return true
 }
