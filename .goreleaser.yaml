@@ -1,0 +1,99 @@
+version: 2
+
+project_name: superkube
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: superkube
+    main: ./cmd/superkube
+    binary: superkube
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/optimumsage/superkube/internal/version.Version={{ .Version }}
+      - -X github.com/optimumsage/superkube/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/optimumsage/superkube/internal/version.Date={{ .CommitDate }}
+
+archives:
+  - id: superkube
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - src: scripts/sk-install-symlink
+        strip_parent: true
+    format_overrides:
+      - goos: linux
+        format: tar.gz
+      - goos: darwin
+        format: tar.gz
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+# Homebrew tap. Disabled by default — set up the optimumsage/homebrew-tap repo
+# and uncomment to publish. The formula installs both `superkube` and `sk` so
+# users can use either name.
+# brews:
+#   - name: superkube
+#     repository:
+#       owner: optimumsage
+#       name: homebrew-tap
+#     homepage: https://github.com/optimumsage/superkube
+#     description: A safer, prettier, AI-assisted wrapper around kubectl.
+#     license: Apache-2.0
+#     install: |
+#       bin.install "superkube"
+#       bin.install_symlink bin/"superkube" => "sk"
+#     test: |
+#       system "#{bin}/superkube", "version"
+
+# Linux packages. Disabled by default; flip on once we have a stable release
+# cadence. nfpm produces deb/rpm/apk in one shot.
+# nfpms:
+#   - id: linux
+#     vendor: optimumsage
+#     homepage: https://github.com/optimumsage/superkube
+#     maintainer: superkube authors <noreply@example.com>
+#     description: A safer, prettier, AI-assisted wrapper around kubectl.
+#     license: Apache-2.0
+#     formats: [deb, rpm, apk]
+#     bindir: /usr/bin
+#     contents:
+#       - src: /usr/bin/superkube
+#         dst: /usr/bin/sk
+#         type: symlink
+
+release:
+  github:
+    owner: optimumsage
+    name: superkube
+  draft: true
+  prerelease: auto
+  name_template: "v{{ .Version }}"

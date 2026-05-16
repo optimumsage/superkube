@@ -1,0 +1,11 @@
+#!/bin/sh
+# sk-install-symlink: drop next to the unpacked `superkube` binary to create
+# the `sk` convenience alias. Run after extracting the release tarball.
+#
+# Usage:
+#   tar -xzf superkube_<ver>_<os>_<arch>.tar.gz
+#   ./sk-install-symlink /usr/local/bin     # or wherever you put superkube
+set -eu
+dir="${1:-$(pwd)}"
+ln -sf "${dir}/superkube" "${dir}/sk"
+echo "installed ${dir}/sk -> superkube"

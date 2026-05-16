@@ -1,0 +1,164 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/optimumsage/superkube/internal/ai"
+	"github.com/optimumsage/superkube/internal/kube"
+	"github.com/optimumsage/superkube/internal/kubectl"
+	"github.com/optimumsage/superkube/internal/ui"
+)
+
+func newDiagnoseCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "diagnose TYPE/NAME",
+		Short: "Gather describe + events + logs and ask the AI provider what's wrong",
+		Long: `Gathers diagnostic data for a pod (or other workload) and asks the local AI
+provider to identify the most likely cause:
+
+  - kubectl describe TYPE NAME
+  - recent events with involvedObject = NAME
+  - last 200 log lines from each container (redacted)
+
+The combined payload is redacted before being sent to the provider, but
+redaction is best-effort. Use --no-context if you don't want the data sent.`,
+		Args: cobra.ExactArgs(1),
+		RunE: runDiagnose,
+	}
+}
+
+func runDiagnose(cmd *cobra.Command, args []string) error {
+	return runAIDiagnostic(cmd, args[0], "diagnose")
+}
+
+// runAIDiagnostic is the shared body for `sk diagnose` and `sk why`: same data
+// gathering, same provider invocation, different prompt template. The template
+// name selects which set of instructions the model receives.
+func runAIDiagnostic(cmd *cobra.Command, resource, templateName string) error {
+	resourceType, resourceName := splitResource(resource)
+	if resourceName == "" {
+		return errors.New(templateName + ": expected TYPE/NAME (e.g. pod/foo)")
+	}
+
+	provider, err := ai.Detect(Flags.AIProvider)
+	if err != nil {
+		return err
+	}
+	recordAIProvider(provider.Name())
+
+	runner, err := kubectl.Default()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 90*time.Second)
+	defer cancel()
+
+	inputs := gatherDiagnostic(ctx, runner, resource, resourceType, resourceName)
+
+	prompt, err := ai.Render(templateName, inputs)
+	if err != nil {
+		return err
+	}
+
+	w, stopSpinner := ui.SpinUntilFirstByte("asking "+provider.Name()+"…", os.Stdout)
+	defer stopSpinner()
+	if err := provider.Run(ctx, prompt, w); err != nil {
+		return fmt.Errorf("%s: %w", provider.Name(), err)
+	}
+	fmt.Fprintln(os.Stdout)
+	return nil
+}
+
+// gatherDiagnostic shells out to kubectl to collect the describe/events/logs
+// payload that AI prompts consume. Each step is best-effort: if logs aren't
+// available yet (very fresh pod), we keep going with the rest. The current
+// namespace from --namespace is honored; without it kubectl uses the context's
+// default.
+func gatherDiagnostic(ctx context.Context, runner *kubectl.Runner, resource, resourceType, resourceName string) ai.PromptInputs {
+	inputs := ai.PromptInputs{Resource: resource}
+	if !Flags.NoContext {
+		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: Flags.Context}
+		inputs.Context, _ = loader.CurrentContext()
+		inputs.Namespace, _ = loader.CurrentNamespace()
+	}
+	describeOut, _ := captureKubectl(ctx, runner, kubectlNSArgs("describe", resourceType, resourceName))
+	eventsOut, _ := captureKubectl(ctx, runner, kubectlNSArgs(
+		"get", "events", "--sort-by=.lastTimestamp",
+		"--field-selector", "involvedObject.name="+resourceName,
+	))
+	logsOut, _ := captureKubectl(ctx, runner, kubectlNSArgs(
+		"logs", resourceName, "--tail=200", "--all-containers=true", "--prefix=true",
+	))
+	inputs.Describe = describeOut
+	inputs.Events = eventsOut
+	inputs.Logs = ai.TruncateLogs(logsOut, 200)
+
+	// Owner chain + sibling pods enrich the prompt for pod targets. Best-effort:
+	// errors are swallowed because we'd rather render a partial diagnose than
+	// fail on a missing RBAC permission.
+	if isPodKind(resourceType) && !Flags.NoContext {
+		ns := inputs.Namespace
+		if ns == "" {
+			ns = "default"
+		}
+		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: Flags.Context}
+		inputs.OwnerChain, _ = loader.OwnerChain(ctx, ns, resourceName)
+		inputs.SiblingPods, _ = loader.SiblingPods(ctx, ns, resourceName)
+	}
+	return inputs
+}
+
+// isPodKind reports whether kind names a Pod resource in any of kubectl's
+// accepted forms. The owner-chain enrichment is pod-specific because we walk
+// pod.OwnerReferences upward; other workload kinds would need a different walk.
+func isPodKind(kind string) bool {
+	switch strings.ToLower(kind) {
+	case "pod", "pods", "po":
+		return true
+	}
+	return false
+}
+
+// splitResource accepts both "pod/foo" and "pod foo" forms. Returns
+// type/name; if only a single token is supplied we default the type to "pod"
+// because that's the by-far most common diagnose target.
+func splitResource(s string) (kind, name string) {
+	if idx := strings.IndexByte(s, '/'); idx >= 0 {
+		return s[:idx], s[idx+1:]
+	}
+	return "pod", s
+}
+
+// kubectlNSArgs builds a kubectl argv that respects the user's --namespace
+// flag (if set) without adding it twice.
+func kubectlNSArgs(parts ...string) []string {
+	if Flags.Namespace == "" {
+		return parts
+	}
+	return append(parts, "-n", Flags.Namespace)
+}
+
+func captureKubectl(ctx context.Context, runner *kubectl.Runner, args []string) (string, error) {
+	var stdout, stderr bytes.Buffer
+	err := runner.Run(ctx, args, kubectl.RunOpts{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	out := stdout.String()
+	if err != nil && stderr.Len() > 0 {
+		// Surface the stderr inline so the AI can see e.g. "container has
+		// previous logs available — try --previous". Don't fail the whole
+		// diagnose just because logs aren't readable yet.
+		out += "\n[stderr]\n" + stderr.String()
+	}
+	return out, err
+}

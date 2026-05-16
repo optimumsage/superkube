@@ -1,0 +1,26 @@
+# Build artifacts
+/bin/
+/dist/
+*.out
+*.test
+*.coverage
+
+# IDEs / editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local state
+.envrc
+.env
+.envrc.local
+
+# Go
+vendor/
+
+README-PRIVATE.md
