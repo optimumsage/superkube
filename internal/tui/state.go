@@ -1,6 +1,7 @@
 // Package tui implements `sk tui`: a full-screen Pods browser backed by a
-// client-go informer, with row actions that suspend the TUI and shell out to
-// existing superkube subcommands (describe / logs / diagnose).
+// client-go informer, with row actions that either suspend the TUI and shell
+// out to existing superkube subcommands (describe / diagnose / why / events /
+// yaml) or stay in-process for a streamed in-TUI log view.
 package tui
 
 import (
@@ -13,14 +14,20 @@ import (
 
 // PodRow is the flattened, render-ready shape of a Pod. We keep the raw
 // CreationTimestamp around for accurate age display on each render tick
-// without re-walking the original object.
+// without re-walking the original object. Node / IP / Containers feed the
+// details side panel; Status is the kubectl-flavored status string (which
+// can differ from Phase, e.g. CrashLoopBackOff).
 type PodRow struct {
-	Namespace string
-	Name      string
-	Phase     string
-	Ready     string // "n/m"
-	Restarts  int32
-	Created   time.Time
+	Namespace  string
+	Name       string
+	Phase      string
+	Status     string // kubectl-style status (CrashLoopBackOff, Terminating, ...)
+	Ready      string // "n/m"
+	Restarts   int32
+	Created    time.Time
+	Node       string
+	IP         string
+	Containers []string
 }
 
 // State is the shared store the informer writes to and the bubbletea model
@@ -74,14 +81,53 @@ func toRow(p *corev1.Pod) PodRow {
 		}
 		restarts += cs.RestartCount
 	}
-	return PodRow{
+	row := PodRow{
 		Namespace: p.Namespace,
 		Name:      p.Name,
 		Phase:     string(p.Status.Phase),
+		Status:    derivePodStatus(p),
 		Ready:     intRatio(ready, total),
 		Restarts:  restarts,
 		Created:   p.CreationTimestamp.Time,
+		Node:      p.Spec.NodeName,
+		IP:        p.Status.PodIP,
 	}
+	for _, c := range p.Spec.Containers {
+		row.Containers = append(row.Containers, c.Name)
+	}
+	return row
+}
+
+// derivePodStatus mirrors a subset of kubectl's printers/internalversion logic
+// so the Status column matches what users see in `kubectl get pods`. We don't
+// try to be exhaustive — only the cases that meaningfully differ from Phase
+// (Terminating, container waiting/terminated Reason) are handled.
+func derivePodStatus(p *corev1.Pod) string {
+	if p.DeletionTimestamp != nil {
+		return "Terminating"
+	}
+	// Init container failures bubble up first; if any init container is in a
+	// non-Completed waiting/terminated state, that's what kubectl shows.
+	for _, cs := range p.Status.InitContainerStatuses {
+		switch {
+		case cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0:
+			if cs.State.Terminated.Reason != "" {
+				return "Init:" + cs.State.Terminated.Reason
+			}
+			return "Init:Error"
+		case cs.State.Waiting != nil && cs.State.Waiting.Reason != "" && cs.State.Waiting.Reason != "PodInitializing":
+			return "Init:" + cs.State.Waiting.Reason
+		}
+	}
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+			return cs.State.Waiting.Reason
+		}
+		if cs.State.Terminated != nil && cs.State.Terminated.Reason != "" {
+			return cs.State.Terminated.Reason
+		}
+	}
+	return string(p.Status.Phase)
 }
 
 func intRatio(a, b int) string {

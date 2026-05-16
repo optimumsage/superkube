@@ -7,13 +7,13 @@ import (
 	"sort"
 	"time"
 
-	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/optimumsage/superkube/internal/config"
 	"github.com/optimumsage/superkube/internal/kube"
 	"github.com/optimumsage/superkube/internal/ui"
+	"github.com/optimumsage/superkube/internal/ui/picker"
 )
 
 func newNSCmd() *cobra.Command {
@@ -70,25 +70,24 @@ func runNS(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	picked := current
-	options := make([]huh.Option[string], 0, len(names))
+	items := make([]picker.Item, 0, len(names))
 	for _, n := range names {
-		label := n
+		it := picker.Item{Label: n, Value: n}
 		if n == current {
-			label = n + " (current)"
+			it.Hint = "current"
 		}
-		options = append(options, huh.NewOption(label, n))
+		items = append(items, it)
 	}
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().
-			Title("Switch namespace").
-			Options(options...).
-			Value(&picked),
-	))
-	if err := form.Run(); err != nil {
+	picked, ok, err := picker.Run(picker.Config{
+		Title:       "Switch namespace",
+		Items:       items,
+		Current:     current,
+		Placeholder: "filter namespaces…",
+	})
+	if err != nil {
 		return err
 	}
-	if picked == current {
+	if !ok || picked == "" || picked == current {
 		return nil
 	}
 	if err := loader.SwitchNamespace(picked, stateDir); err != nil {
