@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="superkube" width="160" height="160"/>
+</p>
+
 # superkube
 
 A safer, prettier, AI-assisted wrapper around `kubectl`.
