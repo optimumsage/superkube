@@ -36,6 +36,7 @@ func runRollout(cmd *cobra.Command, args []string) error {
 		if len(positionals) == 0 {
 			return errors.New("rollout undo: workload required (e.g. deployment/foo)")
 		}
+		ReshowBanner()
 		if err := guardrail.TypedName(
 			fmt.Sprintf("rollout undo %s", positionals[0]),
 			positionals[0],

@@ -40,6 +40,7 @@ func runDrain(cmd *cobra.Command, args []string) error {
 		return errors.New("drain: NODE name required")
 	}
 	node := positionals[0]
+	ReshowBanner()
 	if err := guardrail.TypedName(
 		fmt.Sprintf("drain node %s (this will evict its pods)", node),
 		node,

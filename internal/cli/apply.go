@@ -42,6 +42,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		if !preview.HasChanges {
 			return nil
 		}
+		ReshowBanner()
 		if err := confirmApply(cmd.Context(), yes); err != nil {
 			if errors.Is(err, guardrail.ErrAborted) {
 				return nil

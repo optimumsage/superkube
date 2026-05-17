@@ -78,6 +78,8 @@ sk diagnose pod/broken                # describe + events + logs → AI explains
 sk why pod/pending-pod                # focused AI diagnosis for stuck workloads
 sk logs deploy/web --ai               # AI summary of errors in the log tail
 sk logs --multi=deploy/web -f         # live tail across all pods, colored prefix
+sk pf start svc/web 8080:80           # background port-forward, tracked by id
+sk audit stats --since 24h            # what did I run today, what failed?
 sk tui                                # full-screen pod browser
 ```
 
@@ -95,6 +97,20 @@ By default, `superkube` will:
 - Confirm `sk scale --replicas=0`, `sk rollout undo`, `sk drain`, and `sk cordon`.
 
 You can bypass any prompt with `--yes`. In non-TTY environments (CI pipelines, redirected stdin), destructive commands **refuse** to run without `--yes` — never silently auto-confirm.
+
+#### Context safety banner
+
+`superkube` prints a banner at the top of every command whose **kubectl context name** suggests a production-class environment, *even when no config policy is set*. The classifier matches word-bounded tokens so it doesn't false-positive on substrings:
+
+| Context name | Banner |
+|---|---|
+| `prod`, `prod-eu-west-1`, `eu-prod-1`, `arn:…:cluster/prod-payments`, `…-prd`, `…-production`, `live-*`, `mainnet` | red `PRODUCTION CONTEXT: …` |
+| `staging`, `qa-*`, `uat-*`, `canary`, `preprod`, `*-test`, `*-stg` | yellow `non-prod risky context: …` |
+| anything else | (no banner) |
+
+The same banner is **re-shown immediately before** the confirmation prompt on `sk delete`, `sk apply`, `sk drain`, `sk scale --replicas=0`, and `sk rollout undo`, so a long `kubectl diff` can't push the warning off-screen before you confirm.
+
+An explicit policy entry (next section) always wins over the auto-classifier — useful if you want to label `prod-sandbox` as harmless or escalate a name that doesn't pattern-match.
 
 #### Per-context policy
 
@@ -202,13 +218,34 @@ sk ctx clean --keep-orphans          # leave cluster/user entries behind
 Every executed command is appended as JSON Lines to `${XDG_STATE_HOME:-$HOME/.local/state}/superkube/audit.log` (mode `0600`). Each entry includes the verb, full argv, kubectl context, namespace, exit code, duration, and the AI provider used for AI commands. The file rotates at 10 MB.
 
 ```sh
-sk audit log                  # tail recent entries
-sk audit log --since 1h       # filter by time
-sk audit log -f               # follow new entries
-sk audit path                 # print the file path
+sk audit log                          # pretty table on a TTY, JSONL when piped
+sk audit log --raw                    # force JSONL even on a TTY (for jq)
+sk audit log --since 1h               # filter by time
+sk audit log --verb delete            # only `delete` entries
+sk audit log --context prod           # substring match on context name
+sk audit log --failed                 # only non-zero exit codes
+sk audit log --last 20                # most recent 20 matching entries
+sk audit log -f                       # follow new entries (filters still apply)
+sk audit stats --since 24h            # top verbs, contexts, and failure count
+sk audit path                         # print the file path
 ```
 
-Secret-shaped values in argv (`--from-literal=KEY=VALUE`) are redacted before being written.
+Secret-shaped values in argv (`--from-literal=KEY=VALUE`) are redacted before being written. Output stays byte-for-byte JSONL whenever stdout isn't a TTY, so existing `jq` / `awk` pipelines keep working.
+
+### Port-forward manager (`sk pf`)
+
+`sk pf` runs `kubectl port-forward` in the background and tracks it across shells. Each forward gets a short id and a log file; dead processes are pruned automatically on the next listing.
+
+```sh
+sk pf start svc/web 8080:80           # launches in background, prints the id
+sk pf start pod/api 5005:5005 -n staging
+sk pf                                 # list active forwards
+sk pf logs pf-1abc -f                 # tail the forward's log
+sk pf stop pf-1abc                    # SIGTERM (escalates to SIGKILL after 2s)
+sk pf stop all                        # stop every active forward
+```
+
+State lives in `${XDG_STATE_HOME:-$HOME/.local/state}/superkube/portforward.json`; per-forward logs are in `…/superkube/portforward/<id>.log`. The forwards inherit your `--context`, `--namespace`, and `--kubeconfig` flags from `sk` unless you override them inline with `-n`/`--address`.
 
 ### Krew plugin compatibility
 
@@ -250,7 +287,10 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 | `sk ai explain "<q>"` | free-form AI question with current ctx/ns as light context | n/a |
 | `sk diagnose pod/<name>` | describe + events + logs + owner chain + sibling pods → AI explains | n/a |
 | `sk why pod/<name>` | tighter AI prompt for Pending / CrashLoop / ImagePull / OOM / probe failures | n/a |
-| `sk audit log [--since 1h] [-f]` / `audit path` | view or locate the audit log | n/a |
+| `sk audit log [--since 1h] [--verb V] [--context C] [--failed] [--last N] [--raw] [-f]` | view audit entries (table on TTY, JSONL piped) | n/a |
+| `sk audit stats [--since 24h]` | top verbs/contexts and failure count | n/a |
+| `sk audit path` | print the audit log file path | n/a |
+| `sk pf start TARGET PORTS…` / `sk pf [list]` / `sk pf logs ID` / `sk pf stop ID\|all` | manage background port-forwards across shells | n/a |
 | `sk config init [--force]` / `config path` | manage `~/.config/superkube/config.yaml` | n/a |
 | `sk version` | binary, Go, platform, kubectl, AI provider versions | n/a |
 | `sk upgrade [--check\|--force\|--version v…]` | self-upgrade to the latest GitHub release; verifies checksums, atomic in-place replace | confirm |
@@ -266,6 +306,8 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 |---|---|
 | `~/.config/superkube/config.yaml` | per-context policy (forbid, banner). Run `sk config init` to scaffold. |
 | `${XDG_STATE_HOME:-~/.local/state}/superkube/audit.log` | append-only JSONL audit log. |
+| `${XDG_STATE_HOME:-~/.local/state}/superkube/portforward.json` | tracked active port-forwards (used by `sk pf`). |
+| `${XDG_STATE_HOME:-~/.local/state}/superkube/portforward/<id>.log` | per-forward log file. |
 | `~/.kube/config` (and `$KUBECONFIG`) | inherited from kubectl, untouched. |
 
 ### Environment variables
