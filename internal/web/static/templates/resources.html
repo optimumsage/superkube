@@ -28,6 +28,9 @@
       <thead>
         <tr>
           <template x-for="h in headers" :key="h"><th x-text="h"></th></template>
+          <template x-if="!loading && headers.length > 0">
+            <th class="right">Actions</th>
+          </template>
           <template x-if="loading && headers.length === 0">
             <th>&nbsp;</th>
           </template>
@@ -80,6 +83,16 @@
                   </template>
                 </td>
               </template>
+              <td class="right" @click.stop>
+                <div class="kebab" x-data="{ open: false }" @click.outside="open = false">
+                  <button class="btn btn-ghost btn-sm" @click="open = !open" aria-label="Actions">⋯</button>
+                  <div class="kebab-menu" x-show="open" x-cloak>
+                    <template x-for="a in window.kindActions(kind)" :key="a.label">
+                      <button class="kebab-item" :class="a.danger && 'is-danger'" @click="open = false; a.run(row, $root)" x-text="a.label"></button>
+                    </template>
+                  </div>
+                </div>
+              </td>
             </tr>
           </template>
         </template>

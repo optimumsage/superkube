@@ -1,0 +1,106 @@
+{{define "helm_detail.html"}}
+<section class="page slide-up" x-data="HelmDetail('{{.Namespace}}', '{{.Name}}')">
+  <header class="page-head">
+    <div class="page-head-text" style="min-width: 0; flex: 1;">
+      <p class="page-sub" style="margin: 0 0 6px;">
+        <span class="pill pill-info">Helm release</span>
+        <template x-if="info && info.info && info.info.status">
+          <span :class="helmPill(info.info.status)" x-text="info.info.status"></span>
+        </template>
+        <template x-if="info && info.chart && info.chart.metadata"><span class="muted">chart <span class="mono" x-text="info.chart.metadata.name + '-' + info.chart.metadata.version"></span></span></template>
+      </p>
+      <h1 class="page-title mono" style="font-size: 22px; word-break: break-all;" x-text="ns + ' / ' + name"></h1>
+    </div>
+    <div class="page-actions">
+      <button class="btn btn-ghost btn-sm" @click="goto('/helm')">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+        Back
+      </button>
+      <button class="btn btn-sm" @click="upgrade()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-upload"/></svg>
+        Upgrade
+      </button>
+      <button class="btn btn-sm" @click="askRollback()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-refresh"/></svg>
+        Rollback
+      </button>
+      <button class="btn btn-danger btn-sm" @click="askUninstall()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-trash"/></svg>
+        Uninstall
+      </button>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <div class="tab" :class="tab==='values'&&'active'" @click="tab='values'; load('values')">
+      <svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg>
+      Values
+    </div>
+    <div class="tab" :class="tab==='manifest'&&'active'" @click="tab='manifest'; load('manifest')">
+      <svg class="icon" aria-hidden="true"><use href="#i-clipboard"/></svg>
+      Manifest
+    </div>
+    <div class="tab" :class="tab==='notes'&&'active'" @click="tab='notes'; load('notes')">
+      <svg class="icon" aria-hidden="true"><use href="#i-file-text"/></svg>
+      Notes
+    </div>
+    <div class="tab" :class="tab==='hooks'&&'active'" @click="tab='hooks'; load('hooks')">
+      <svg class="icon" aria-hidden="true"><use href="#i-bolt"/></svg>
+      Hooks
+    </div>
+    <div class="tab" :class="tab==='history'&&'active'" @click="tab='history'; loadHistory()">
+      <svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg>
+      History
+    </div>
+  </div>
+
+  <div x-show="tab==='values'" class="fade-in">
+    <div class="row" style="margin-bottom: 10px;">
+      <label class="checkrow"><input type="checkbox" x-model="computed" @change="load('values')" /> show computed values (defaults + user)</label>
+    </div>
+    <template x-if="loadingText">
+      <div class="code" style="display:flex;align-items:center;justify-content:center;padding:40px;"><span class="spinner spinner-lg"></span></div>
+    </template>
+    <template x-if="!loadingText">
+      <pre class="code" x-text="text || '(empty)'"></pre>
+    </template>
+  </div>
+
+  <div x-show="tab==='manifest' || tab==='notes' || tab==='hooks'" class="fade-in">
+    <template x-if="loadingText">
+      <div class="code" style="display:flex;align-items:center;justify-content:center;padding:40px;"><span class="spinner spinner-lg"></span></div>
+    </template>
+    <template x-if="!loadingText">
+      <pre class="code" x-text="text || '(empty)'"></pre>
+    </template>
+  </div>
+
+  <div x-show="tab==='history'" class="fade-in">
+    <div class="table-wrap scroll">
+      <table class="table">
+        <thead><tr><th>Rev</th><th>Status</th><th>Chart</th><th>App version</th><th>Updated</th><th>Description</th><th></th></tr></thead>
+        <tbody>
+          <template x-for="h in history" :key="h.revision">
+            <tr>
+              <td class="mono" x-text="h.revision"></td>
+              <td><span :class="helmPill(h.status)" x-text="h.status"></span></td>
+              <td class="mono" x-text="h.chart"></td>
+              <td x-text="h.app_version"></td>
+              <td x-text="h.updated"></td>
+              <td x-text="h.description"></td>
+              <td class="right">
+                <button class="btn btn-ghost btn-sm" @click="askRollbackTo(h.revision)" :disabled="h.status === 'deployed'">
+                  Rollback to this
+                </button>
+              </td>
+            </tr>
+          </template>
+          <template x-if="history.length === 0">
+            <tr class="row-empty"><td colspan="7"><div class="empty" style="border:none;background:transparent;padding:24px 0;"><h3>No history</h3></div></td></tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{{end}}

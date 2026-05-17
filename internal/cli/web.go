@@ -6,6 +6,7 @@ import (
 	"github.com/optimumsage/superkube/internal/ai"
 	"github.com/optimumsage/superkube/internal/audit"
 	"github.com/optimumsage/superkube/internal/guardrail"
+	"github.com/optimumsage/superkube/internal/helm"
 	"github.com/optimumsage/superkube/internal/kube"
 	"github.com/optimumsage/superkube/internal/kubectl"
 	"github.com/optimumsage/superkube/internal/web"
@@ -35,6 +36,9 @@ pass --token explicitly.`,
 			if err != nil {
 				return err
 			}
+			// helm is optional — nil signals "not installed" to the web layer,
+			// which then renders a friendly notice instead of failing.
+			helmR, _ := helm.Default()
 			loader := kube.Loader{
 				KubeconfigPath: Flags.Kubeconfig,
 				Context:        Flags.Context,
@@ -42,6 +46,7 @@ pass --token explicitly.`,
 			deps := web.Deps{
 				Loader:     loader,
 				Runner:     runner,
+				Helm:       helmR,
 				Policy:     func() guardrail.Policy { return Policy() },
 				Banner:     ActiveBanner,
 				Audit:      audit.Record,

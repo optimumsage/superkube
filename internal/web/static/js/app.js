@@ -65,6 +65,7 @@
       ctxOptions: [],
       nsOptions: [],
       banner: { text: '', kind: '' },
+      helm: { installed: false, version: '', releases_detected: 0 },
       theme: localStorage.getItem('sk-theme') || 'dark',
       path: location.pathname,
       htmxBusy: false,
@@ -107,6 +108,10 @@
           [/^\/config$/, '/frag/config'],
           [/^\/settings$/, '/frag/settings'],
           [/^\/exec\/([^/]+)\/([^/]+)$/, (m) => `/frag/exec/${m[1]}/${m[2]}`],
+          [/^\/helm$/, '/frag/helm'],
+          [/^\/helm\/install$/, '/frag/helm/install'],
+          [/^\/helm\/repos$/, '/frag/helm/repos'],
+          [/^\/helm\/([^/]+)\/([^/]+)$/, (m) => `/frag/helm/${m[1]}/${m[2]}`],
         ];
         for (const [re, target] of map) {
           const m = path.match(re);
@@ -134,6 +139,7 @@
           this.kubectlVersion = infoRes.kubectl || '';
           this.ai = infoRes.ai || '';
           this.banner = infoRes.banner || { text: '', kind: '' };
+          this.helm = infoRes.helm || { installed: false, version: '', releases_detected: 0 };
           // 3. ctx/ns LAST, after the matching <option> elements exist.
           await this.$nextTick();
           this.ctx = infoRes.context || '';
@@ -151,6 +157,7 @@
           this.kubectlVersion = d.kubectl || '';
           this.ai = d.ai || '';
           this.banner = d.banner || { text: '', kind: '' };
+          this.helm = d.helm || { installed: false, version: '', releases_detected: 0 };
           await this.$nextTick();
           this.ctx = d.context || '';
           this.ns = d.namespace || '';
@@ -191,7 +198,9 @@
         });
         this.ns = name;
         this.toast('Namespace: ' + (name || 'all'), 'info');
-        htmx.ajax('GET', '/frag/pods', { target: '#main', push: true });
+        // Reload the page the user is currently on, not a hardcoded /pods —
+        // they expect ns-scoped data to refresh in-place.
+        this.loadRoute(location.pathname);
       },
 
       toggleTheme() {
@@ -653,23 +662,26 @@
         htmx.ajax('GET', '/frag/exec/' + this.ns + '/' + this.name, { target: '#main', push: true });
         history.replaceState({}, '', '/exec/' + this.ns + '/' + this.name);
       },
+      openPF() {
+        htmx.ajax('GET', '/frag/pf', { target: '#main', push: true });
+        history.replaceState({}, '', '/pf?pod=' + encodeURIComponent(this.name) + '&ns=' + encodeURIComponent(this.ns));
+      },
+      editYAML() {
+        const path = '/resources/pods/' + this.ns + '/' + this.name + '/edit';
+        htmx.ajax('GET', '/frag/resources/pods/' + this.ns + '/' + this.name + '/edit', { target: '#main', push: true });
+        history.replaceState({}, '', path);
+      },
+      async askRestart() {
+        const d = await window.confirmThen('/api/v1/destructive/delete', { kind: 'pod', name: this.name, namespace: this.ns });
+        if (!d) return;
+        const ok = (d.exit_code === 0);
+        Alpine.$data(document.body).toast(ok ? ('Restarting ' + this.name) : ('Restart failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+      },
       async askDelete() {
-        const r1 = await fetch('/api/v1/destructive/delete', {
-          method: 'POST', headers: csrfHeaders(),
-          body: JSON.stringify({ kind: 'pod', name: this.name, namespace: this.ns }),
-        });
-        const d1 = await r1.json();
-        if (d1.status === 'blocked') { Alpine.$data(document.body).toast('Forbidden: ' + (d1.forbid_reason || d1.detail), 'error'); return; }
-        if (d1.status !== 'needs_confirmation') return;
-        const typed = prompt(d1.prompt + ' (expected: ' + d1.expect + ')');
-        if (typed == null) return;
-        const r2 = await fetch('/api/v1/destructive/delete', {
-          method: 'POST', headers: csrfHeaders(),
-          body: JSON.stringify({ kind: 'pod', name: this.name, namespace: this.ns, confirm_token: d1.token, confirm_value: typed }),
-        });
-        const d2 = await r2.json();
-        Alpine.$data(document.body).toast(d2.exit_code === 0 ? ('Deleted ' + this.name) : ('Failed: ' + (d2.output || '').slice(0, 200)),
-          d2.exit_code === 0 ? 'success' : 'error');
+        const d = await window.confirmThen('/api/v1/destructive/delete', { kind: 'pod', name: this.name, namespace: this.ns });
+        if (!d) return;
+        const ok = (d.exit_code === 0);
+        Alpine.$data(document.body).toast(ok ? ('Deleted ' + this.name) : ('Failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
       },
     };
   };
@@ -1100,4 +1112,658 @@
     }
     return { term, ws };
   };
+
+  // ---- Shared destructive-flow helper ------------------------------------
+  //
+  // confirmThen runs the two-step preview→commit pattern used by every
+  // destructive endpoint in handlers_destructive.go and handlers_helm.go.
+  //
+  //   1. POST `url` with `body` (no confirm_token).
+  //   2. If the server replies `needs_confirmation`, render the right modal
+  //      (yes/no or typed value) and on accept POST again with
+  //      confirm_token / confirm_value merged in.
+  //   3. Resolve with the second response's JSON.
+  //
+  // Returns null if the user cancels.
+  async function confirmThen(url, body, opts = {}) {
+    const method = opts.method || 'POST';
+    const r1 = await fetch(url, { method, headers: csrfHeaders(), body: JSON.stringify(body) });
+    const d1 = await r1.json().catch(() => ({}));
+    if (d1.status === 'blocked') {
+      Alpine.$data(document.body).toast('Forbidden: ' + (d1.forbid_reason || d1.detail || 'policy'), 'error');
+      return null;
+    }
+    if (!r1.ok && d1.status !== 'needs_confirmation') {
+      Alpine.$data(document.body).toast(d1.error || ('HTTP ' + r1.status), 'error');
+      return null;
+    }
+    if (d1.status !== 'needs_confirmation') {
+      // First call already executed (yes=true or no confirm needed).
+      return d1;
+    }
+    // Render the right modal. For typed_phrase / typed_name we use prompt();
+    // for yes/no we use confirm(). Both are intentionally browser-native so
+    // we stay framework-light.
+    let typed = '';
+    if (d1.style === 'typed_name' || d1.style === 'typed_phrase') {
+      typed = window.prompt((d1.prompt || '') + (d1.expect ? ` (type: ${d1.expect})` : ''), '');
+      if (typed == null) return null;
+    } else {
+      if (!window.confirm((d1.prompt || 'Proceed?') + (d1.detail ? '\n\n' + d1.detail : ''))) return null;
+    }
+    const commitBody = Object.assign({}, body, { confirm_token: d1.token, confirm_value: typed });
+    const r2 = await fetch(url, { method, headers: csrfHeaders(), body: JSON.stringify(commitBody) });
+    const d2 = await r2.json().catch(() => ({}));
+    if (!r2.ok) {
+      Alpine.$data(document.body).toast(d2.error || ('HTTP ' + r2.status), 'error');
+      return d2;
+    }
+    return d2;
+  }
+
+  // helmPill maps a Helm status string to the matching CSS pill class.
+  function helmPill(status) {
+    const s = (status || '').toLowerCase();
+    if (s === 'deployed') return 'pill pill-success';
+    if (s === 'failed') return 'pill pill-danger';
+    if (s.startsWith('pending') || s === 'uninstalling') return 'pill pill-warning';
+    if (s === 'superseded') return 'pill pill-muted';
+    if (s === 'uninstalled') return 'pill pill-muted';
+    return 'pill';
+  }
+
+  // gotoPath swaps the right frag into #main and pushes a history entry.
+  function gotoPath(path) {
+    const map = {
+      '/helm': '/frag/helm',
+      '/helm/install': '/frag/helm/install',
+      '/helm/repos': '/frag/helm/repos',
+    };
+    let frag = map[path];
+    if (!frag) {
+      // /helm/{ns}/{name}
+      const m = path.match(/^\/helm\/([^/]+)\/([^/]+)$/);
+      if (m) frag = `/frag/helm/${m[1]}/${m[2]}`;
+    }
+    if (!frag) frag = '/frag/dashboard';
+    htmx.ajax('GET', frag, { target: '#main', swap: 'innerHTML' });
+    history.pushState({}, '', path);
+    if (window.Alpine) Alpine.$data(document.body).path = path;
+  }
+
+  // ---- Helm pages --------------------------------------------------------
+
+  window.HelmPage = function () {
+    return {
+      items: [], filter: '', loading: true, error: '', allNamespaces: false,
+      status: { installed: false, version: '', releases_detected: 0 },
+      helmPill,
+      async init() {
+        await this.refreshStatus();
+        await this.reload();
+      },
+      async refreshStatus() {
+        try {
+          const r = await fetch('/api/v1/helm/status');
+          this.status = await r.json();
+        } catch {}
+      },
+      async reload() {
+        this.loading = true; this.error = '';
+        try {
+          if (!this.status.installed) { this.items = []; return; }
+          const q = this.allNamespaces ? '?all=1' : '';
+          const r = await fetch('/api/v1/helm/releases' + q);
+          if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            this.error = d.error || ('HTTP ' + r.status);
+            this.items = [];
+            return;
+          }
+          const d = await r.json();
+          this.items = d.items || [];
+        } catch (e) {
+          this.error = String(e.message || e);
+        } finally {
+          this.loading = false;
+        }
+      },
+      visible() {
+        const f = this.filter.trim().toLowerCase();
+        if (!f) return this.items;
+        return this.items.filter(r =>
+          (r.name || '').toLowerCase().includes(f) ||
+          (r.namespace || '').toLowerCase().includes(f) ||
+          (r.chart || '').toLowerCase().includes(f)
+        );
+      },
+      open(r) { this.openRelease(r); },
+      openRelease(r) {
+        gotoPath('/helm/' + r.namespace + '/' + r.name);
+      },
+      goto(p) { gotoPath(p); },
+      async rollback(r) {
+        const rev = window.prompt('Revision to roll back to (number)?', '');
+        if (!rev) return;
+        const revision = parseInt(rev, 10);
+        if (!revision || revision < 1) { Alpine.$data(document.body).toast('Invalid revision', 'error'); return; }
+        const d = await confirmThen('/api/v1/helm/rollback', { name: r.name, namespace: r.namespace, revision });
+        if (!d) return;
+        const ok = (d.exit_code === 0);
+        Alpine.$data(document.body).toast(ok ? 'Rolled back ' + r.name : ('Rollback failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+        if (ok) await this.reload();
+      },
+      async uninstall(r) {
+        const d = await confirmThen('/api/v1/helm/uninstall', { name: r.name, namespace: r.namespace });
+        if (!d) return;
+        const ok = (d.exit_code === 0);
+        Alpine.$data(document.body).toast(ok ? 'Uninstalled ' + r.name : ('Uninstall failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+        if (ok) await this.reload();
+      },
+      upgrade(r) {
+        // Upgrade UX needs the chart + values, so we route to the install page
+        // with the release pre-filled.
+        Alpine.$data(document.body).toast('Upgrade flow lives on the release detail page.', 'info');
+        gotoPath('/helm/' + r.namespace + '/' + r.name);
+      },
+    };
+  };
+
+  window.HelmDetail = function (ns, name) {
+    return {
+      ns, name, tab: 'values', text: '', loadingText: false, computed: false,
+      info: null, history: [],
+      helmPill,
+      async init() {
+        await this.refreshStatus();
+        await this.load('values');
+      },
+      async refreshStatus() {
+        try {
+          const r = await fetch('/api/v1/helm/releases/' + this.ns + '/' + this.name);
+          if (r.ok) this.info = await r.json();
+        } catch {}
+      },
+      async load(which) {
+        this.loadingText = true; this.text = '';
+        try {
+          let url = '/api/v1/helm/releases/' + this.ns + '/' + this.name + '/' + which;
+          if (which === 'values' && this.computed) url += '?computed=1';
+          const r = await fetch(url);
+          this.text = await r.text();
+        } catch (e) {
+          this.text = 'load failed: ' + e;
+        } finally {
+          this.loadingText = false;
+        }
+      },
+      async loadHistory() {
+        try {
+          const r = await fetch('/api/v1/helm/releases/' + this.ns + '/' + this.name + '/history');
+          const d = await r.json();
+          this.history = (d.items || []).slice().reverse();
+        } catch {}
+      },
+      goto(p) { gotoPath(p); },
+      async askRollback() {
+        const rev = window.prompt('Roll back ' + this.name + ' to revision?', '');
+        if (!rev) return;
+        await this.askRollbackTo(parseInt(rev, 10));
+      },
+      async askRollbackTo(revision) {
+        if (!revision || revision < 1) return;
+        const d = await confirmThen('/api/v1/helm/rollback', { name: this.name, namespace: this.ns, revision });
+        if (!d) return;
+        const ok = (d.exit_code === 0);
+        Alpine.$data(document.body).toast(ok ? 'Rolled back ' + this.name : ('Rollback failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+        if (ok) { await this.refreshStatus(); await this.loadHistory(); }
+      },
+      async askUninstall() {
+        const d = await confirmThen('/api/v1/helm/uninstall', { name: this.name, namespace: this.ns });
+        if (!d) return;
+        const ok = (d.exit_code === 0);
+        Alpine.$data(document.body).toast(ok ? 'Uninstalled ' + this.name : ('Uninstall failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+        if (ok) gotoPath('/helm');
+      },
+      upgrade() {
+        Alpine.$data(document.body).toast('Use Install page to upgrade to a new chart version (re-applies values).', 'info');
+        gotoPath('/helm/install');
+      },
+    };
+  };
+
+  window.HelmInstall = function () {
+    return {
+      term: '', hits: [], picked: null,
+      releaseName: '', namespace: 'default',
+      createNamespace: false, wait: false, atomic: false,
+      values: '', rendered: '', confirmToken: '',
+      status: '', busy: false, result: '',
+      goto(p) { gotoPath(p); },
+      async search() {
+        this.busy = true; this.hits = []; this.status = 'searching…';
+        try {
+          const r = await fetch('/api/v1/helm/search?term=' + encodeURIComponent(this.term));
+          const d = await r.json();
+          this.hits = d.items || [];
+          this.status = this.hits.length ? '' : 'no results';
+        } catch (e) {
+          this.status = 'search failed: ' + e;
+        } finally {
+          this.busy = false;
+        }
+      },
+      async pick(h) {
+        this.picked = h;
+        this.releaseName = this.releaseName || h.name.split('/').pop();
+        this.values = '# loading defaults…';
+        try {
+          const [repo, chart] = (h.name || '').split('/');
+          const r = await fetch('/api/v1/helm/charts/values?repo=' + encodeURIComponent(repo) + '&chart=' + encodeURIComponent(chart) + (h.version ? '&version=' + encodeURIComponent(h.version) : ''));
+          this.values = await r.text();
+        } catch {
+          this.values = '';
+        }
+      },
+      async preview() {
+        if (!this.picked) return;
+        this.busy = true; this.status = 'rendering dry-run…'; this.rendered = ''; this.confirmToken = '';
+        try {
+          const r = await fetch('/api/v1/helm/install/preview', {
+            method: 'POST', headers: csrfHeaders(),
+            body: JSON.stringify({
+              name: this.releaseName, namespace: this.namespace,
+              chart: this.picked.name, version: this.picked.version,
+              values: this.values,
+              create_namespace: this.createNamespace,
+              wait: this.wait, atomic: this.atomic,
+            }),
+          });
+          const d = await r.json();
+          if (!r.ok) { this.status = 'preview failed: ' + (d.error || ''); return; }
+          this.rendered = d.rendered || '';
+          this.confirmToken = d.confirm_token || '';
+          this.status = 'review the rendered manifest, then commit';
+        } catch (e) {
+          this.status = 'preview failed: ' + e;
+        } finally {
+          this.busy = false;
+        }
+      },
+      async commit() {
+        if (!this.confirmToken) return;
+        this.busy = true; this.status = 'installing…';
+        try {
+          const r = await fetch('/api/v1/helm/install/commit', {
+            method: 'POST', headers: csrfHeaders(),
+            body: JSON.stringify({
+              name: this.releaseName, namespace: this.namespace,
+              chart: this.picked.name, version: this.picked.version,
+              values: this.values,
+              create_namespace: this.createNamespace,
+              wait: this.wait, atomic: this.atomic,
+              confirm_token: this.confirmToken,
+            }),
+          });
+          const d = await r.json();
+          this.result = d.output || (d.error || '');
+          this.status = (d.exit_code === 0) ? 'installed' : 'install failed';
+          if (d.exit_code === 0) Alpine.$data(document.body).toast('Installed ' + this.releaseName, 'success');
+        } catch (e) {
+          this.status = 'install failed: ' + e;
+        } finally {
+          this.busy = false;
+        }
+      },
+    };
+  };
+
+  window.HelmRepos = function () {
+    return {
+      items: [], loading: true, busy: false, lastOutput: '',
+      newName: '', newURL: '', newUser: '', newPass: '',
+      goto(p) { gotoPath(p); },
+      async init() { await this.reload(); },
+      async reload() {
+        this.loading = true;
+        try {
+          const r = await fetch('/api/v1/helm/repos');
+          const d = await r.json();
+          this.items = d.items || [];
+        } finally {
+          this.loading = false;
+        }
+      },
+      async add() {
+        this.busy = true; this.lastOutput = '';
+        try {
+          const r = await fetch('/api/v1/helm/repos', {
+            method: 'POST', headers: csrfHeaders(),
+            body: JSON.stringify({ name: this.newName, url: this.newURL, username: this.newUser, password: this.newPass }),
+          });
+          const d = await r.json();
+          this.lastOutput = d.output || d.error || '';
+          if (r.ok && d.exit_code === 0) {
+            Alpine.$data(document.body).toast('Repo added: ' + this.newName, 'success');
+            this.newName = ''; this.newURL = ''; this.newUser = ''; this.newPass = '';
+          } else {
+            Alpine.$data(document.body).toast('Add failed', 'error');
+          }
+          await this.reload();
+        } finally {
+          this.busy = false;
+        }
+      },
+      async remove(name) {
+        const d = await confirmThen('/api/v1/helm/repos/' + encodeURIComponent(name), {}, { method: 'DELETE' });
+        if (!d) return;
+        this.lastOutput = d.output || d.error || '';
+        Alpine.$data(document.body).toast(d.exit_code === 0 ? 'Removed ' + name : 'Remove failed', d.exit_code === 0 ? 'success' : 'error');
+        await this.reload();
+      },
+      async update() {
+        this.busy = true; this.lastOutput = '';
+        try {
+          const r = await fetch('/api/v1/helm/repos/update', { method: 'POST', headers: csrfHeaders() });
+          const d = await r.json();
+          this.lastOutput = d.output || d.error || '';
+          Alpine.$data(document.body).toast(d.exit_code === 0 ? 'Repos updated' : 'Update failed', d.exit_code === 0 ? 'success' : 'error');
+        } finally {
+          this.busy = false;
+        }
+      },
+    };
+  };
+
+  // ---- Workload row actions (used by pods.html, resources.html) ----------
+  //
+  // kindActions returns the action menu entries to show on a resource row.
+  // Each entry is { label, danger?, run(row, page) }. `page` is the calling
+  // Alpine component so actions can call back into reload(), open(), etc.
+  function kindActions(kind) {
+    const k = (kind || '').toLowerCase();
+    switch (k) {
+      case 'pods': case 'pod': case 'po':
+        return [
+          { label: 'Logs',       run: (row, p) => quickLogsFromRow(row, p) },
+          { label: 'Exec',       run: (row, p) => quickExecFromRow(row, p) },
+          { label: 'Port-forward', run: (row, p) => quickPFFromRow(row, p) },
+          { label: 'Describe',   run: (row, p) => quickDescribe('pods', row, p) },
+          { label: 'Restart',    run: (row, p) => deleteRow('pod', row, p, { friendly: 'Restart' }) },
+          { label: 'Delete',     danger: true, run: (row, p) => deleteRow('pod', row, p) },
+        ];
+      case 'deployments': case 'deployment': case 'deploy':
+        return [
+          { label: 'Scale +1',   run: (row, p) => scaleRow('deployment', row, p, +1) },
+          { label: 'Scale −1',   run: (row, p) => scaleRow('deployment', row, p, -1) },
+          { label: 'Scale to…',  run: (row, p) => scaleToRow('deployment', row, p) },
+          { label: 'Rollout restart', run: (row, p) => rolloutRow('deployment', 'restart', row, p) },
+          { label: 'Pause',      run: (row, p) => rolloutRow('deployment', 'pause', row, p) },
+          { label: 'Resume',     run: (row, p) => rolloutRow('deployment', 'resume', row, p) },
+          { label: 'History',    run: (row, p) => rolloutHistory('deployment', row, p) },
+          { label: 'Undo',       run: (row, p) => rolloutUndo('deployment', row, p) },
+          { label: 'Edit YAML',  run: (row, p) => editYAML('deployments', row, p) },
+          { label: 'Describe',   run: (row, p) => quickDescribe('deployments', row, p) },
+          { label: 'Delete',     danger: true, run: (row, p) => deleteRow('deployment', row, p) },
+        ];
+      case 'statefulsets': case 'statefulset': case 'sts':
+        return [
+          { label: 'Scale +1',   run: (row, p) => scaleRow('statefulset', row, p, +1) },
+          { label: 'Scale −1',   run: (row, p) => scaleRow('statefulset', row, p, -1) },
+          { label: 'Scale to…',  run: (row, p) => scaleToRow('statefulset', row, p) },
+          { label: 'Rollout restart', run: (row, p) => rolloutRow('statefulset', 'restart', row, p) },
+          { label: 'History',    run: (row, p) => rolloutHistory('statefulset', row, p) },
+          { label: 'Undo',       run: (row, p) => rolloutUndo('statefulset', row, p) },
+          { label: 'Edit YAML',  run: (row, p) => editYAML('statefulsets', row, p) },
+          { label: 'Describe',   run: (row, p) => quickDescribe('statefulsets', row, p) },
+          { label: 'Delete',     danger: true, run: (row, p) => deleteRow('statefulset', row, p) },
+        ];
+      case 'daemonsets': case 'daemonset': case 'ds':
+        return [
+          { label: 'Rollout restart', run: (row, p) => rolloutRow('daemonset', 'restart', row, p) },
+          { label: 'History',    run: (row, p) => rolloutHistory('daemonset', row, p) },
+          { label: 'Edit YAML',  run: (row, p) => editYAML('daemonsets', row, p) },
+          { label: 'Describe',   run: (row, p) => quickDescribe('daemonsets', row, p) },
+          { label: 'Delete',     danger: true, run: (row, p) => deleteRow('daemonset', row, p) },
+        ];
+      case 'replicasets': case 'replicaset': case 'rs':
+        return [
+          { label: 'Scale to…',  run: (row, p) => scaleToRow('replicaset', row, p) },
+          { label: 'Edit YAML',  run: (row, p) => editYAML('replicasets', row, p) },
+          { label: 'Describe',   run: (row, p) => quickDescribe('replicasets', row, p) },
+          { label: 'Delete',     danger: true, run: (row, p) => deleteRow('replicaset', row, p) },
+        ];
+      case 'nodes': case 'node': case 'no':
+        return [
+          { label: 'Cordon',     run: (row, p) => nodeAction('cordon', row, p) },
+          { label: 'Uncordon',   run: (row, p) => nodeAction('uncordon', row, p) },
+          { label: 'Drain',      danger: true, run: (row, p) => drainNode(row, p) },
+          { label: 'Describe',   run: (row, p) => quickDescribe('nodes', row, p) },
+        ];
+      case 'services': case 'service': case 'svc':
+      case 'ingresses': case 'ingress': case 'ing':
+      case 'configmaps': case 'configmap': case 'cm':
+      case 'secrets': case 'secret':
+        return [
+          { label: 'Edit YAML',  run: (row, p) => editYAML(k, row, p) },
+          { label: 'Describe',   run: (row, p) => quickDescribe(k, row, p) },
+          { label: 'Delete',     danger: true, run: (row, p) => deleteRow(k, row, p) },
+        ];
+      case 'cronjobs': case 'cronjob': case 'cj':
+        return [
+          { label: 'Trigger run', run: (row, p) => triggerCronJob(row, p) },
+          { label: 'Edit YAML',  run: (row, p) => editYAML('cronjobs', row, p) },
+          { label: 'Describe',   run: (row, p) => quickDescribe('cronjobs', row, p) },
+          { label: 'Delete',     danger: true, run: (row, p) => deleteRow('cronjob', row, p) },
+        ];
+      case 'jobs': case 'job':
+        return [
+          { label: 'Edit YAML',  run: (row, p) => editYAML('jobs', row, p) },
+          { label: 'Describe',   run: (row, p) => quickDescribe('jobs', row, p) },
+          { label: 'Delete',     danger: true, run: (row, p) => deleteRow('job', row, p) },
+        ];
+      default:
+        return [
+          { label: 'Describe',   run: (row, p) => quickDescribe(k, row, p) },
+          { label: 'Delete',     danger: true, run: (row, p) => deleteRow(k, row, p) },
+        ];
+    }
+  }
+
+  // rowName/rowNs pull values out of a kubectl table row using the header
+  // names. Headers vary by kind (some include a namespace column), so we look
+  // them up rather than assuming positions.
+  function rowName(headers, row) { return rowField(headers, row, 'name') || row[0] || ''; }
+  function rowNs(headers, row, fallback) {
+    return rowField(headers, row, 'namespace') || fallback || Alpine.$data(document.body).ns || '';
+  }
+  function rowReplicas(headers, row) {
+    // Try common columns. kubectl emits "READY" as "0/3" — split on "/" and
+    // return the *desired* count (denominator) so up/down nudges are stable.
+    const ready = rowField(headers, row, 'ready');
+    if (ready && ready.includes('/')) {
+      const n = parseInt(ready.split('/')[1], 10);
+      if (!isNaN(n)) return n;
+    }
+    const desired = rowField(headers, row, 'desired') || rowField(headers, row, 'replicas');
+    const n = parseInt(desired, 10);
+    return isNaN(n) ? 0 : n;
+  }
+
+  async function deleteRow(kind, row, page, opts) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    const d = await confirmThen('/api/v1/destructive/delete', { kind, name, namespace: ns });
+    if (!d) return;
+    const ok = (d.exit_code === 0);
+    const verb = (opts && opts.friendly) || 'Delete';
+    Alpine.$data(document.body).toast(ok ? (verb + 'd ' + name) : (verb + ' failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+    if (ok && page.reload) page.reload();
+  }
+
+  async function scaleRow(kind, row, page, delta) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    const cur = rowReplicas(headers, row);
+    const next = Math.max(0, cur + delta);
+    if (!name) return;
+    const d = await confirmThen('/api/v1/destructive/scale', { kind, name, namespace: ns, replicas: next });
+    if (!d) return;
+    const ok = (d.exit_code === 0);
+    Alpine.$data(document.body).toast(ok ? `${name} → ${next} replicas` : ('Scale failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+    if (ok && page.reload) page.reload();
+  }
+
+  async function scaleToRow(kind, row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    const raw = window.prompt('Scale ' + kind + '/' + name + ' to how many replicas?', String(rowReplicas(headers, row)));
+    if (raw == null) return;
+    const replicas = parseInt(raw, 10);
+    if (isNaN(replicas) || replicas < 0) { Alpine.$data(document.body).toast('Invalid replica count', 'error'); return; }
+    const d = await confirmThen('/api/v1/destructive/scale', { kind, name, namespace: ns, replicas });
+    if (!d) return;
+    const ok = (d.exit_code === 0);
+    Alpine.$data(document.body).toast(ok ? `${name} → ${replicas}` : ('Scale failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+    if (ok && page.reload) page.reload();
+  }
+
+  async function rolloutRow(kind, action, row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    const d = await confirmThen('/api/v1/destructive/rollout/' + action, { kind, name, namespace: ns });
+    if (!d) return;
+    const ok = (d.exit_code === 0);
+    Alpine.$data(document.body).toast(ok ? (action + ' ' + name) : (action + ' failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+  }
+
+  async function rolloutHistory(kind, row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    // history is an inspection — POST with yes=true so the server doesn't issue a confirm token.
+    const r = await fetch('/api/v1/destructive/rollout/history', {
+      method: 'POST', headers: csrfHeaders(),
+      body: JSON.stringify({ kind, name, namespace: ns, yes: true }),
+    });
+    const d = await r.json().catch(() => ({}));
+    window.alert(d.output || 'No history');
+  }
+
+  async function rolloutUndo(kind, row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    const raw = window.prompt('Roll back to revision (leave blank for previous)?', '');
+    const revision = raw ? parseInt(raw, 10) : 0;
+    const d = await confirmThen('/api/v1/destructive/rollout/undo', { kind, name, namespace: ns, revision });
+    if (!d) return;
+    const ok = (d.exit_code === 0);
+    Alpine.$data(document.body).toast(ok ? ('Rolled back ' + name) : ('Undo failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+  }
+
+  async function nodeAction(verb, row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    if (!name) return;
+    const d = await confirmThen('/api/v1/destructive/' + verb, { name });
+    if (!d) return;
+    const ok = (d.exit_code === 0);
+    Alpine.$data(document.body).toast(ok ? (verb + ' ' + name) : (verb + ' failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+    if (ok && page.reload) page.reload();
+  }
+
+  async function drainNode(row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    if (!name) return;
+    const d = await confirmThen('/api/v1/destructive/drain', { name, ignore_ds: true, delete_empty: true });
+    if (!d) return;
+    const ok = (d.exit_code === 0);
+    Alpine.$data(document.body).toast(ok ? ('Drained ' + name) : ('Drain failed: ' + (d.output || '').slice(0, 200)), ok ? 'success' : 'error');
+    if (ok && page.reload) page.reload();
+  }
+
+  async function quickDescribe(kind, row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    try {
+      const r = await fetch('/api/v1/resources/' + kind + '/' + (ns || '_') + '/' + name + '/describe');
+      const text = await r.text();
+      window.alert(text);
+    } catch (e) {
+      Alpine.$data(document.body).toast('Describe failed: ' + e, 'error');
+    }
+  }
+
+  function quickLogsFromRow(row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    gotoPath('/pods/' + (ns || '_') + '/' + name);
+  }
+
+  function quickExecFromRow(row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    htmx.ajax('GET', '/frag/exec/' + (ns || '_') + '/' + name, { target: '#main', push: true });
+    history.replaceState({}, '', '/exec/' + (ns || '_') + '/' + name);
+  }
+
+  function quickPFFromRow(row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    gotoPathRoot('/pf?pod=' + encodeURIComponent(name) + '&ns=' + encodeURIComponent(ns));
+  }
+
+  function gotoPathRoot(path) {
+    htmx.ajax('GET', '/frag/pf', { target: '#main', push: true });
+    history.replaceState({}, '', path);
+  }
+
+  function editYAML(kind, row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    const path = '/resources/' + kind + '/' + (ns || '_') + '/' + name + '/edit';
+    htmx.ajax('GET', '/frag/resources/' + kind + '/' + (ns || '_') + '/' + name + '/edit', { target: '#main', push: true });
+    history.replaceState({}, '', path);
+  }
+
+  async function triggerCronJob(row, page) {
+    const headers = page.headers || [];
+    const name = rowName(headers, row);
+    const ns = rowNs(headers, row);
+    if (!name) return;
+    const jobName = name + '-manual-' + Math.floor(Date.now() / 1000);
+    const r = await fetch('/api/v1/passthrough', {
+      method: 'POST', headers: csrfHeaders(),
+      body: JSON.stringify({ argv: ['create', 'job', jobName, '--from=cronjob/' + name, '-n', ns] }),
+    });
+    const d = await r.json().catch(() => ({}));
+    const ok = (d.exit_code === 0);
+    Alpine.$data(document.body).toast(ok ? ('Triggered ' + jobName) : ('Trigger failed: ' + ((d.stderr || d.stdout || '')).slice(0, 200)), ok ? 'success' : 'error');
+  }
+
+  // Expose for templates that reference them via `kindActions(...)`.
+  window.kindActions = kindActions;
+  window.confirmThen = confirmThen;
+  window.helmPill = helmPill;
 })();

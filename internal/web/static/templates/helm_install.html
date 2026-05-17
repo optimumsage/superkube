@@ -1,0 +1,86 @@
+{{define "helm_install.html"}}
+<section class="page slide-up" x-data="HelmInstall()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Install Helm release</h1>
+      <p class="page-sub">Search a configured repo, edit the values, preview, then apply.</p>
+    </div>
+    <div class="page-actions">
+      <button class="btn btn-ghost btn-sm" @click="goto('/helm')">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+        Back
+      </button>
+    </div>
+  </header>
+
+  <div class="card" style="padding: 16px;">
+    <h2 style="margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">1 · Pick a chart</h2>
+    <div class="row">
+      <input class="input" style="flex:1; min-width: 220px;" placeholder="search term (e.g. nginx, redis)" x-model="term" @keydown.enter="search()" />
+      <button class="btn" @click="search()" :disabled="busy">Search</button>
+    </div>
+    <template x-if="hits.length > 0">
+      <div class="table-wrap scroll" style="margin-top: 12px;">
+        <table class="table">
+          <thead><tr><th>Chart</th><th>Version</th><th>App version</th><th>Description</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="h in hits" :key="h.name + h.version">
+              <tr :class="picked && picked.name === h.name && picked.version === h.version ? 'selected' : ''">
+                <td class="mono" x-text="h.name"></td>
+                <td x-text="h.version"></td>
+                <td x-text="h.app_version"></td>
+                <td x-text="h.description"></td>
+                <td class="right"><button class="btn btn-ghost btn-sm" @click="pick(h)">Pick</button></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </template>
+  </div>
+
+  <template x-if="picked">
+    <div class="card" style="padding: 16px; margin-top: 16px;">
+      <h2 style="margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">2 · Configure</h2>
+      <div class="row" style="margin-bottom: 10px;">
+        <label style="flex:1; min-width: 180px;">
+          <span style="display:block; font-size:12px; color: var(--fg-subtle); margin-bottom: 4px;">Release name</span>
+          <input class="input" x-model="releaseName" placeholder="my-release" />
+        </label>
+        <label style="flex:1; min-width: 180px;">
+          <span style="display:block; font-size:12px; color: var(--fg-subtle); margin-bottom: 4px;">Namespace</span>
+          <input class="input" x-model="namespace" placeholder="default" />
+        </label>
+        <label class="checkrow" style="align-self: end;"><input type="checkbox" x-model="createNamespace" /> create namespace</label>
+        <label class="checkrow" style="align-self: end;"><input type="checkbox" x-model="wait" /> wait</label>
+        <label class="checkrow" style="align-self: end;"><input type="checkbox" x-model="atomic" /> atomic</label>
+      </div>
+      <h3 style="margin: 16px 0 6px; font-size: 12px; color: var(--fg-subtle);">values.yaml (defaults preloaded — edit as needed)</h3>
+      <textarea class="input" style="font-family: ui-monospace, monospace; min-height: 260px; resize: vertical; width: 100%;" x-model="values"></textarea>
+      <div class="row" style="margin-top: 10px;">
+        <button class="btn" @click="preview()" :disabled="busy || !releaseName || !namespace">Preview (dry-run)</button>
+        <span class="muted" x-text="status"></span>
+      </div>
+    </div>
+  </template>
+
+  <template x-if="rendered">
+    <div class="card" style="padding: 16px; margin-top: 16px;">
+      <h2 style="margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">3 · Confirm</h2>
+      <p class="muted">Helm rendered the templates below. Review, then commit.</p>
+      <pre class="code" x-text="rendered" style="max-height: 320px; overflow: auto;"></pre>
+      <div class="row" style="margin-top: 10px;">
+        <button class="btn" @click="commit()" :disabled="busy">Install</button>
+        <button class="btn btn-ghost" @click="rendered = ''; confirmToken = ''">Cancel</button>
+      </div>
+    </div>
+  </template>
+
+  <template x-if="result">
+    <div class="card" style="padding: 16px; margin-top: 16px;">
+      <h2 style="margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">Result</h2>
+      <pre class="code" x-text="result"></pre>
+    </div>
+  </template>
+</section>
+{{end}}

@@ -59,6 +59,7 @@
         <symbol id="i-package" viewBox="0 0 24 24"><line x1="16.5" y1="9.4" x2="7.55" y2="4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></symbol>
         <symbol id="i-inbox" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
         <symbol id="i-stack" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></symbol>
+        <symbol id="i-helm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9"/><line x1="12" y1="3" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="21"/><line x1="3" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="21" y2="12"/><line x1="5.6" y1="5.6" x2="7.8" y2="7.8"/><line x1="16.2" y1="16.2" x2="18.4" y2="18.4"/><line x1="5.6" y1="18.4" x2="7.8" y2="16.2"/><line x1="16.2" y1="7.8" x2="18.4" y2="5.6"/></symbol>
       </defs>
     </svg>
 
@@ -73,13 +74,28 @@
         <span class="brand-name">superkube</span>
       </div>
       <div class="switcher">
-        <div class="switcher-group">
+        <div class="switcher-group" x-data="{ open: false, q: '' }" @click.outside="open = false" @keydown.escape.window="open = false">
           <span class="switcher-label">ctx</span>
-          <select class="switcher-select" @change="switchContext($event.target.value)" x-model="ctx" :title="ctx">
-            <template x-for="c in ctxOptions" :key="c">
-              <option :value="c" x-text="shortCtx(c)"></option>
-            </template>
-          </select>
+          <button class="combo-button" :title="ctx" @click="open = !open; if (open) $nextTick(() => $refs.cq && $refs.cq.focus())">
+            <span class="combo-text" x-text="shortCtx(ctx) || 'select context'"></span>
+            <svg class="combo-caret" viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+          <div class="combo-panel" x-show="open" x-cloak>
+            <input class="combo-search" type="search" placeholder="search contexts…" x-model="q" x-ref="cq" />
+            <div class="combo-list">
+              <template x-for="c in ctxOptions.filter(c => !q.trim() || c.toLowerCase().includes(q.toLowerCase()))" :key="c">
+                <button class="combo-item" :class="c === ctx && 'is-active'" @click="switchContext(c); open = false; q = ''" :title="c">
+                  <span class="combo-item-text" x-text="shortCtx(c)"></span>
+                  <template x-if="c === ctx">
+                    <svg class="combo-item-check" viewBox="0 0 24 24" aria-hidden="true"><polyline points="20 6 9 17 4 12" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>
+                  </template>
+                </button>
+              </template>
+              <template x-if="ctxOptions.filter(c => !q.trim() || c.toLowerCase().includes(q.toLowerCase())).length === 0">
+                <div class="combo-empty">no matches</div>
+              </template>
+            </div>
+          </div>
         </div>
         <div class="switcher-group">
           <span class="switcher-label">ns</span>
@@ -161,6 +177,13 @@
         <a class="navlink" :class="path === '/pf' && 'active'" hx-get="/frag/pf" hx-target="#main" hx-push-url="/pf" hx-trigger="click">
           <span class="navicon"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg></span>
           <span class="label">Port-forward</span>
+        </a>
+
+        <a class="navlink" :class="path.startsWith('/helm') && 'active'" hx-get="/frag/helm" hx-target="#main" hx-push-url="/helm" hx-trigger="click"
+           x-show="helm.installed || helm.releases_detected > 0">
+          <span class="navicon"><svg class="icon" aria-hidden="true"><use href="#i-helm"/></svg></span>
+          <span class="label">Helm</span>
+          <span class="nav-meta" x-text="helm.installed ? (helm.releases_detected || 0) + ' rel' : 'install'"></span>
         </a>
 
         <div class="nav-section">System</div>

@@ -11,6 +11,7 @@ import (
 
 	"github.com/optimumsage/superkube/internal/audit"
 	"github.com/optimumsage/superkube/internal/config"
+	"github.com/optimumsage/superkube/internal/helm"
 	"github.com/optimumsage/superkube/internal/kube"
 	"github.com/optimumsage/superkube/internal/kubectl"
 	"github.com/optimumsage/superkube/internal/version"
@@ -61,10 +62,39 @@ func (s *Server) apiInfo(w http.ResponseWriter, r *http.Request) {
 			"text": bannerText,
 			"kind": bannerKind,
 		},
+		"helm":  s.helmInfo(r.Context(), loader),
 		"csrf":  s.csrf.ensureCookie(w, r),
 		"token": tokenIfRequired(s.cfg.Token),
 	}
 	s.render.JSON(w, http.StatusOK, resp)
+}
+
+// helmInfo summarizes whether helm is installed and whether Helm 3 releases
+// already exist in the cluster. Both probes are best-effort with a tight
+// timeout so the SPA's initial /api/v1/info call never hangs.
+func (s *Server) helmInfo(ctx context.Context, loader kube.Loader) map[string]any {
+	out := map[string]any{
+		"installed":         false,
+		"version":           "",
+		"releases_detected": 0,
+	}
+	if s.deps.Helm != nil {
+		out["installed"] = true
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		if v, err := s.deps.Helm.Version(probeCtx); err == nil {
+			out["version"] = v
+		}
+	}
+	// Detect-via-secrets is best-effort. 4s caters to clusters with a slow
+	// secrets list across all namespaces; degrade gracefully to 0 on timeout.
+	probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	refs, err := helm.DetectReleases(probeCtx, loader, "")
+	if err == nil {
+		out["releases_detected"] = len(refs)
+	}
+	return out
 }
 
 // tokenIfRequired echoes back the URL token so the shell can attach it to

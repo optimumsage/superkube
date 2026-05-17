@@ -212,6 +212,44 @@ sk web
 
 The default opens `http://127.0.0.1:<auto-port>` in your browser. Every CLI verb has a screen — pods (live), workloads, services, nodes, **ConfigMaps / Secrets / Ingresses** (live + inline edit), logs (single, multi-pod, and AI-summarized), apply with diff preview, delete/scale/rollout/drain/cordon with the same typed-name and typed-phrase confirmations, port-forward manager, audit log viewer (filterable + follow), AI chat (`sk ai explain`), diagnose / why, config editor, and an embedded xterm.js terminal for pod exec.
 
+#### Workload actions
+
+Pod rows, workload rows, and node rows all surface a per-row `⋯` action menu. Every destructive action runs through the same guardrail policy and typed-name / typed-phrase confirmation flow the CLI uses — `--yes` is not bypassed by the UI, and `forbid:` rules block unconditionally.
+
+| Kind | Actions on the row menu |
+|---|---|
+| Pods | Logs, Exec, Port-forward, Describe, **Restart** (= delete pod; controller recreates), **Delete** |
+| Deployments / StatefulSets | Scale ±1, Scale to…, Rollout restart, Pause, Resume, History, **Undo** (with revision picker), Edit YAML, Describe, Delete |
+| DaemonSets | Rollout restart, History, Edit YAML, Describe, Delete |
+| ReplicaSets | Scale to…, Edit YAML, Describe, Delete |
+| Jobs / CronJobs | (cronjobs) **Trigger run**, Edit YAML, Describe, Delete |
+| Services / Ingresses / ConfigMaps / Secrets | Edit YAML, Describe, Delete |
+| Nodes | Cordon, Uncordon, **Drain**, Describe |
+
+The pod detail page header also adds **Restart**, **PF**, **Edit YAML** buttons next to the existing **Exec / Delete / Diagnose / Why?** controls.
+
+#### Helm releases
+
+If `helm` is on PATH (or any Helm 3 release secret exists in the cluster), a **Helm** nav link appears in the sidebar.
+
+- **Releases list** (`/helm`) — table of every release across namespaces with status pill, chart, app version, revision, and an action menu (View / Upgrade / Rollback… / Uninstall).
+- **Release detail** (`/helm/<ns>/<name>`) — tabbed view: **Values** (user values + a "computed" toggle for defaults-merged), **Manifest** (rendered YAML), **Notes**, **Hooks**, **History** (per-revision rollback button).
+- **Install** (`/helm/install`) — three-step flow: search a configured repo, pick a chart + version, edit values; preview runs `helm install --dry-run`; commit applies. Confirmation is a single-use 30-second token.
+- **Repos** (`/helm/repos`) — list, add (with optional basic-auth), update, remove. The password field is **redacted before being recorded in the audit log**.
+- **Helm not installed but releases exist** — if the secret scan finds Helm 3 release secrets but the `helm` binary isn't on PATH, the page renders a banner explaining the situation and linking to install instructions. Listing and detail endpoints return 503 with `{installed:false}` so the SPA degrades gracefully.
+
+Set `$HELM_BIN` to point to a non-PATH helm binary (mirrors how `$KUBECTL` works for the CLI).
+
+Guardrail policy applies to Helm operations under the verb `helm`. The argv passed to `IsForbidden` is the underlying `helm` argv (`["uninstall","my-app","-n","prod"]`, etc.), so you can express rules like:
+
+```yaml
+forbid:
+  - "helm uninstall *"     # block all uninstalls
+  - "helm rollback *"       # block all rollbacks
+```
+
+(Helm policy is best-effort — verbs and flags differ from kubectl; treat as a coarse safety net, not a replacement for cluster RBAC.)
+
 For ConfigMaps, Secrets, and Ingresses, clicking a row opens an editor with two modes — **Form** (the default) and **YAML** — and a per-tab View/Edit toggle:
 
 - **Form view** — kind-specific rendering: ConfigMap key/value pairs (multi-line aware), Secret keys with a *Show decoded values* toggle (encoding back to base64 is handled on save), Ingress class + TLS entries + rules with editable host / path / pathType / backend service-and-port. View mode is read-only; flipping to Edit mode unlocks every input and exposes add/remove buttons for entries.

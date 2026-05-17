@@ -24,6 +24,7 @@ import (
 	"github.com/optimumsage/superkube/internal/ai"
 	"github.com/optimumsage/superkube/internal/audit"
 	"github.com/optimumsage/superkube/internal/guardrail"
+	"github.com/optimumsage/superkube/internal/helm"
 	"github.com/optimumsage/superkube/internal/kube"
 	"github.com/optimumsage/superkube/internal/kubectl"
 )
@@ -34,6 +35,7 @@ import (
 type Deps struct {
 	Loader     kube.Loader
 	Runner     *kubectl.Runner
+	Helm       *helm.Runner // nil when the helm binary is not installed; handlers degrade gracefully
 	Policy     func() guardrail.Policy
 	Banner     func() (text, kind string) // mirrors cli.ActiveBanner
 	Audit      func(audit.Event)
@@ -225,7 +227,7 @@ func parseTemplates() (*template.Template, error) {
 		funcs := template.FuncMap{
 			"upper": strings.ToUpper,
 			"lower": strings.ToLower,
-			"sub": func(a, b int) int { return a - b },
+			"sub":   func(a, b int) int { return a - b },
 		}
 		t, err := template.New("").Funcs(funcs).ParseFS(sub, "*.html")
 		if err != nil {

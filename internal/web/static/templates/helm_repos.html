@@ -1,0 +1,67 @@
+{{define "helm_repos.html"}}
+<section class="page slide-up" x-data="HelmRepos()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Helm repos</h1>
+      <p class="page-sub">Add, update, and remove chart repositories.</p>
+    </div>
+    <div class="page-actions">
+      <button class="btn btn-ghost btn-sm" @click="goto('/helm')">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+        Back
+      </button>
+      <button class="btn btn-ghost btn-sm" @click="update()" :disabled="busy">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-refresh"/></svg>
+        Update all
+      </button>
+    </div>
+  </header>
+
+  <div class="card" style="padding: 14px;">
+    <h2 style="margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">Add a repo</h2>
+    <div class="row">
+      <input class="input" style="max-width: 200px;" placeholder="name" x-model="newName" />
+      <input class="input" style="flex: 1; min-width: 260px;" placeholder="https://charts.example.com" x-model="newURL" />
+      <input class="input" style="max-width: 160px;" placeholder="username (opt)" x-model="newUser" />
+      <input class="input" style="max-width: 160px;" type="password" placeholder="password (opt)" x-model="newPass" />
+      <button class="btn" @click="add()" :disabled="busy || !newName.trim() || !newURL.trim()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-upload"/></svg>
+        Add
+      </button>
+    </div>
+  </div>
+
+  <div class="table-wrap scroll" style="margin-top: 16px;">
+    <table class="table">
+      <thead><tr><th>Name</th><th>URL</th><th></th></tr></thead>
+      <tbody>
+        <template x-if="items.length === 0 && !loading">
+          <tr class="row-empty"><td colspan="3">
+            <div class="empty" style="border:none;background:transparent;padding:24px 0;">
+              <div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#i-inbox"/></svg></div>
+              <h3>No repos configured</h3>
+              <p>Add one above to start searching for charts.</p>
+            </div>
+          </td></tr>
+        </template>
+        <template x-for="r in items" :key="r.name">
+          <tr>
+            <td class="mono" x-text="r.name"></td>
+            <td class="mono" x-text="r.url"></td>
+            <td class="right">
+              <button class="btn btn-danger btn-sm" @click="remove(r.name)" :disabled="busy">
+                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-trash"/></svg>
+                Remove
+              </button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <template x-if="lastOutput">
+    <pre class="code" style="margin-top: 16px;" x-text="lastOutput"></pre>
+  </template>
+</section>
+{{end}}

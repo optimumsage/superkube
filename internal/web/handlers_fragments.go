@@ -74,6 +74,25 @@ func (s *Server) fragExec(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) fragHelm(w http.ResponseWriter, _ *http.Request) {
+	_ = s.render.Template(w, "helm.html", nil)
+}
+
+func (s *Server) fragHelmInstall(w http.ResponseWriter, _ *http.Request) {
+	_ = s.render.Template(w, "helm_install.html", nil)
+}
+
+func (s *Server) fragHelmRepos(w http.ResponseWriter, _ *http.Request) {
+	_ = s.render.Template(w, "helm_repos.html", nil)
+}
+
+func (s *Server) fragHelmRelease(w http.ResponseWriter, r *http.Request) {
+	_ = s.render.Template(w, "helm_detail.html", map[string]string{
+		"Namespace": r.PathValue("ns"),
+		"Name":      r.PathValue("name"),
+	})
+}
+
 // titleKind renders a kubectl-style resource name as a Title Case heading
 // (e.g. "deployments" → "Deployments", "po" → "Pods").
 func titleKind(k string) string {

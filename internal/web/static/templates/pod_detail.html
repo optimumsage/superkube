@@ -17,9 +17,21 @@
         <svg class="icon icon-sm" aria-hidden="true"><use href="#i-help"/></svg>
         Why?
       </button>
-      <button class="btn btn-ghost btn-sm" @click="openExec()">
+      <button class="btn btn-ghost btn-sm" @click="openExec()" title="Open shell">
         <svg class="icon icon-sm" aria-hidden="true"><use href="#i-terminal"/></svg>
         Exec
+      </button>
+      <button class="btn btn-ghost btn-sm" @click="openPF()" title="Port-forward this pod">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-globe"/></svg>
+        PF
+      </button>
+      <button class="btn btn-ghost btn-sm" @click="editYAML()" title="Edit YAML">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-clipboard"/></svg>
+        Edit
+      </button>
+      <button class="btn btn-ghost btn-sm" @click="askRestart()" title="Delete + recreate">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-refresh"/></svg>
+        Restart
       </button>
       <button class="btn btn-danger btn-sm" @click="askDelete()">
         <svg class="icon icon-sm" aria-hidden="true"><use href="#i-trash"/></svg>

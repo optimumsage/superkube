@@ -16,18 +16,19 @@ import (
 // /drain/cordon. Not every field applies to every verb — handlers use only
 // what they need.
 type destructiveRequest struct {
-	Kind         string `json:"kind"`           // resource kind (pod, deployment, node, ...)
-	Name         string `json:"name"`           // resource name
-	Namespace    string `json:"namespace"`      // overrides session ns when set
-	Replicas     *int   `json:"replicas"`       // scale
-	Action       string `json:"action"`         // rollout: undo|restart|pause|resume|status|history
-	All          bool   `json:"all"`            // delete --all
-	Force        bool   `json:"force"`          // drain --force etc.
-	IgnoreDS     bool   `json:"ignore_ds"`      // drain --ignore-daemonsets
-	DeleteEmpty  bool   `json:"delete_empty"`   // drain --delete-emptydir-data
-	Yes          bool   `json:"yes"`            // bypass confirmation (mirrors --yes)
-	ConfirmToken string `json:"confirm_token"`  // returned from a previous needs_confirmation
-	ConfirmValue string `json:"confirm_value"`  // typed value the user entered
+	Kind         string `json:"kind"`          // resource kind (pod, deployment, node, ...)
+	Name         string `json:"name"`          // resource name
+	Namespace    string `json:"namespace"`     // overrides session ns when set
+	Replicas     *int   `json:"replicas"`      // scale
+	Action       string `json:"action"`        // rollout: undo|restart|pause|resume|status|history
+	Revision     int    `json:"revision"`      // rollout undo --to-revision
+	All          bool   `json:"all"`           // delete --all
+	Force        bool   `json:"force"`         // drain --force etc.
+	IgnoreDS     bool   `json:"ignore_ds"`     // drain --ignore-daemonsets
+	DeleteEmpty  bool   `json:"delete_empty"`  // drain --delete-emptydir-data
+	Yes          bool   `json:"yes"`           // bypass confirmation (mirrors --yes)
+	ConfirmToken string `json:"confirm_token"` // returned from a previous needs_confirmation
+	ConfirmValue string `json:"confirm_value"` // typed value the user entered
 }
 
 // confirmationResponse is what we return when the operation needs typed
@@ -107,7 +108,7 @@ func (s *Server) apiDelete(w http.ResponseWriter, r *http.Request) {
 		// Choose style: --all → typed phrase "DELETE"; one name → typed name.
 		bannerText, bannerKind := s.deps.Banner()
 		resp := confirmationResponse{
-			Status: "needs_confirmation",
+			Status:     "needs_confirmation",
 			BannerText: bannerText, BannerKind: bannerKind,
 		}
 		if body.All {
@@ -201,6 +202,9 @@ func (s *Server) apiRollout(w http.ResponseWriter, r *http.Request) {
 	args := []string{"rollout", action, body.Kind + "/" + body.Name}
 	if body.Namespace != "" {
 		args = append(args, "-n", body.Namespace)
+	}
+	if action == "undo" && body.Revision > 0 {
+		args = append(args, fmt.Sprintf("--to-revision=%d", body.Revision))
 	}
 	// undo is destructive; require typed name (CLI parity).
 	if action == "undo" {

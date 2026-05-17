@@ -34,6 +34,10 @@ func (s *Server) registerRoutes() {
 	mux.HandleFunc("GET /config", s.handleIndex)
 	mux.HandleFunc("GET /settings", s.handleIndex)
 	mux.HandleFunc("GET /exec/{ns}/{name}", s.handleIndex)
+	mux.HandleFunc("GET /helm", s.handleIndex)
+	mux.HandleFunc("GET /helm/install", s.handleIndex)
+	mux.HandleFunc("GET /helm/repos", s.handleIndex)
+	mux.HandleFunc("GET /helm/{ns}/{name}", s.handleIndex)
 
 	// Fragment endpoints — return HTML fragments designed to be swapped into
 	// #main by HTMX. Keep them under /frag/ so they're easy to spot in logs.
@@ -51,6 +55,10 @@ func (s *Server) registerRoutes() {
 	mux.HandleFunc("GET /frag/config", s.fragConfigPage)
 	mux.HandleFunc("GET /frag/settings", s.fragSettings)
 	mux.HandleFunc("GET /frag/exec/{ns}/{name}", s.fragExec)
+	mux.HandleFunc("GET /frag/helm", s.fragHelm)
+	mux.HandleFunc("GET /frag/helm/install", s.fragHelmInstall)
+	mux.HandleFunc("GET /frag/helm/repos", s.fragHelmRepos)
+	mux.HandleFunc("GET /frag/helm/{ns}/{name}", s.fragHelmRelease)
 
 	// API v1 — JSON endpoints used by HTMX (out-of-band) and the exec page.
 	mux.HandleFunc("GET /api/v1/info", s.apiInfo)
@@ -97,6 +105,29 @@ func (s *Server) registerRoutes() {
 
 	mux.HandleFunc("POST /api/v1/passthrough", s.apiPassthrough)
 	mux.HandleFunc("GET /api/v1/upgrade/check", s.apiUpgradeCheck)
+
+	// Helm — release lifecycle + repo management. Status works without the
+	// helm binary; everything else 503s with {installed:false} when missing.
+	mux.HandleFunc("GET /api/v1/helm/status", s.apiHelmStatus)
+	mux.HandleFunc("GET /api/v1/helm/releases", s.apiHelmReleasesList)
+	mux.HandleFunc("GET /api/v1/helm/releases/{ns}/{name}", s.apiHelmReleaseStatus)
+	mux.HandleFunc("GET /api/v1/helm/releases/{ns}/{name}/values", s.apiHelmReleaseValues)
+	mux.HandleFunc("GET /api/v1/helm/releases/{ns}/{name}/manifest", s.apiHelmReleaseManifest)
+	mux.HandleFunc("GET /api/v1/helm/releases/{ns}/{name}/notes", s.apiHelmReleaseNotes)
+	mux.HandleFunc("GET /api/v1/helm/releases/{ns}/{name}/hooks", s.apiHelmReleaseHooks)
+	mux.HandleFunc("GET /api/v1/helm/releases/{ns}/{name}/history", s.apiHelmReleaseHistory)
+	mux.HandleFunc("POST /api/v1/helm/rollback", s.apiHelmRollback)
+	mux.HandleFunc("POST /api/v1/helm/uninstall", s.apiHelmUninstall)
+	mux.HandleFunc("POST /api/v1/helm/upgrade/preview", s.apiHelmUpgradePreview)
+	mux.HandleFunc("POST /api/v1/helm/upgrade/commit", s.apiHelmUpgradeCommit)
+	mux.HandleFunc("POST /api/v1/helm/install/preview", s.apiHelmInstallPreview)
+	mux.HandleFunc("POST /api/v1/helm/install/commit", s.apiHelmInstallCommit)
+	mux.HandleFunc("GET /api/v1/helm/repos", s.apiHelmReposList)
+	mux.HandleFunc("POST /api/v1/helm/repos", s.apiHelmRepoAdd)
+	mux.HandleFunc("DELETE /api/v1/helm/repos/{name}", s.apiHelmRepoRemove)
+	mux.HandleFunc("POST /api/v1/helm/repos/update", s.apiHelmRepoUpdate)
+	mux.HandleFunc("GET /api/v1/helm/search", s.apiHelmSearch)
+	mux.HandleFunc("GET /api/v1/helm/charts/values", s.apiHelmChartValues)
 
 	// SSE streams.
 	mux.HandleFunc("GET /api/v1/stream/watch/{kind}", s.streamWatch)

@@ -1,0 +1,126 @@
+{{define "helm.html"}}
+<section class="page slide-up" x-data="HelmPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Helm releases</h1>
+      <p class="page-sub">
+        <span x-show="status.installed">helm <span class="mono" x-text="status.version"></span></span>
+        <template x-if="!status.installed">
+          <span class="pill pill-warning">helm not installed</span>
+        </template>
+        <span class="subtle">·</span>
+        <span x-text="items.length + ' releases'"></span>
+        <template x-if="status.installed">
+          <label class="checkrow" style="margin-left:12px"><input type="checkbox" x-model="allNamespaces" @change="reload()" /> all namespaces</label>
+        </template>
+      </p>
+    </div>
+    <div class="page-actions">
+      <div style="position: relative; max-width: 280px; flex: 1; min-width: 200px;">
+        <input type="search" class="input input-search" placeholder="filter…" x-model="filter" />
+      </div>
+      <button class="btn btn-ghost btn-sm" @click="reload()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-refresh"/></svg>
+        Refresh
+      </button>
+      <template x-if="status.installed">
+        <button class="btn btn-sm" @click="goto('/helm/install')">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#i-upload"/></svg>
+          Install
+        </button>
+      </template>
+      <template x-if="status.installed">
+        <button class="btn btn-ghost btn-sm" @click="goto('/helm/repos')">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#i-package"/></svg>
+          Repos
+        </button>
+      </template>
+    </div>
+  </header>
+
+  <template x-if="!status.installed && status.releases_detected > 0">
+    <div class="banner banner-warning" style="margin-bottom: 14px;">
+      <strong>Helm releases detected, but the <span class="mono">helm</span> binary is not installed on this host.</strong>
+      Install Helm from <a href="https://helm.sh/docs/intro/install/" target="_blank" rel="noopener">helm.sh</a> and restart <span class="mono">sk web</span> to manage these releases.
+    </div>
+  </template>
+
+  <template x-if="!status.installed && status.releases_detected === 0">
+    <div class="empty" style="margin-top: 24px;">
+      <div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#i-package"/></svg></div>
+      <h3>No Helm installation or releases</h3>
+      <p>Install <span class="mono">helm</span> and add a chart repo to get started.</p>
+    </div>
+  </template>
+
+  <div class="table-wrap scroll" x-show="status.installed || status.releases_detected > 0">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Namespace</th>
+          <th>Status</th>
+          <th>Chart</th>
+          <th>App version</th>
+          <th>Revision</th>
+          <th>Updated</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-if="loading">
+          <template x-for="i in 4" :key="i">
+            <tr><td colspan="8"><span class="skel skel-line w70"></span></td></tr>
+          </template>
+        </template>
+
+        <template x-if="!loading && error">
+          <tr class="row-empty"><td colspan="8">
+            <div class="empty" style="border:none;background:transparent;padding:24px 0;">
+              <div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#i-alert"/></svg></div>
+              <h3>Couldn't load releases</h3>
+              <p x-text="error"></p>
+            </div>
+          </td></tr>
+        </template>
+
+        <template x-if="!loading && !error && visible().length === 0">
+          <tr class="row-empty"><td colspan="8">
+            <div class="empty" style="border:none;background:transparent;padding:24px 0;">
+              <div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#i-inbox"/></svg></div>
+              <h3>No releases</h3>
+              <p x-show="status.installed">Click <strong>Install</strong> above to create one.</p>
+            </div>
+          </td></tr>
+        </template>
+
+        <template x-if="!loading && !error">
+          <template x-for="(r, i) in visible()" :key="r.namespace + '/' + r.name + '/' + i">
+            <tr @click="open(r)" style="cursor: pointer;">
+              <td class="mono" x-text="r.name"></td>
+              <td x-text="r.namespace"></td>
+              <td><span :class="helmPill(r.status)" x-text="r.status"></span></td>
+              <td class="mono" x-text="r.chart"></td>
+              <td x-text="r.app_version"></td>
+              <td x-text="r.revision"></td>
+              <td x-text="r.updated"></td>
+              <td class="right" @click.stop>
+                <div class="kebab" x-data="{ open: false }" @click.outside="open = false">
+                  <button class="btn btn-ghost btn-sm" @click="open = !open" aria-label="Actions">⋯</button>
+                  <div class="kebab-menu" x-show="open" x-cloak>
+                    <button class="kebab-item" @click="open = false; $root.openRelease(r)">View</button>
+                    <button class="kebab-item" @click="open = false; $root.upgrade(r)">Upgrade…</button>
+                    <button class="kebab-item" @click="open = false; $root.rollback(r)">Rollback…</button>
+                    <div class="kebab-divider"></div>
+                    <button class="kebab-item is-danger" @click="open = false; $root.uninstall(r)">Uninstall</button>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </template>
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}

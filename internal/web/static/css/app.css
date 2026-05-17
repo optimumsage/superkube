@@ -1106,3 +1106,123 @@ body.theme-light .sidebar {
 
 /* Light monospace tweak for base64 textareas. */
 .textarea.mono { font-family: var(--mono); font-size: 12.5px; }
+
+/* ---- Row action kebab menu ---------------------------------------------
+   Floating action menu used by pods/resources/helm row Actions cells. Sits
+   inside a relatively-positioned wrapper so x-show toggles the dropdown
+   right next to the trigger button. */
+.kebab { position: relative; display: inline-block; }
+.kebab-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 200px;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+  padding: 4px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+}
+.kebab-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  border-radius: calc(var(--r-md) - 4px);
+}
+.kebab-item:hover { background: var(--ink-3); }
+.kebab-item.is-danger { color: var(--danger); }
+.kebab-item.is-danger:hover { background: var(--danger-soft); }
+.kebab-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 6px;
+}
+
+/* ---- Searchable combobox (used by ctx switcher) ----------------------- */
+/* The combobox lives inside .switcher-group so it inherits the pill chrome
+   and focus ring. We give the group `position: relative` only when it hosts
+   the combo so the panel can position itself relative to it. */
+.switcher-group:has(.combo-button) { position: relative; }
+
+.combo-button {
+  appearance: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--ink-3);
+  color: var(--fg);
+  border: 1px solid transparent;
+  border-radius: var(--r-pill);
+  padding: 5px 10px;
+  font-family: var(--mono); font-size: 12px;
+  max-width: 240px;
+  cursor: pointer;
+  transition: background-color 200ms var(--ease-out);
+}
+.combo-button:hover { background-color: var(--ink-4); }
+.combo-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.combo-caret { width: 14px; height: 14px; color: var(--fg-muted); flex-shrink: 0; }
+
+.combo-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 320px;
+  max-width: 480px;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+  padding: 6px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.combo-search {
+  appearance: none; -webkit-appearance: none;
+  width: 100%;
+  background: var(--ink-1);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  font: inherit; font-size: 12.5px;
+  outline: none;
+}
+.combo-search:focus { border-color: var(--accent); box-shadow: var(--ring); }
+.combo-list {
+  max-height: 280px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.combo-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font: inherit; font-family: var(--mono); font-size: 12px;
+  padding: 7px 10px;
+  border-radius: calc(var(--r-md) - 4px);
+  cursor: pointer;
+}
+.combo-item:hover { background: var(--ink-3); }
+.combo-item.is-active { background: var(--ink-3); color: var(--accent); }
+.combo-item-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.combo-item-check { width: 14px; height: 14px; flex-shrink: 0; }
+.combo-empty {
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--fg-subtle);
+}
