@@ -37,6 +37,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 	}
 	if replicas == "0" {
 		target := strings.Join(positionalArgs(kubectlArgs), " ")
+		ReshowBanner()
 		if err := guardrail.YesNo(
 			fmt.Sprintf("Scale %s to zero replicas?", target),
 			"This will gracefully terminate all pods of the workload.",

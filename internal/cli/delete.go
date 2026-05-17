@@ -44,6 +44,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	// Decide confirmation style based on what's being deleted.
+	ReshowBanner()
 	switch {
 	case all:
 		// `delete --all` is the highest-risk variant. Refuse without both --yes

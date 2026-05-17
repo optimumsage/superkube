@@ -177,6 +177,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newTUICmd())
 	root.AddCommand(newUpgradeCmd())
+	root.AddCommand(newPortForwardCmd())
 
 	// Force cobra to register its completion subcommand now (it's normally
 	// lazy on first Execute()), so our passthrough routing sees it as a known
@@ -237,15 +238,62 @@ func loadPolicy() {
 	activePolicy = guardrail.EffectivePolicy(cfg, current)
 }
 
+// activeBannerText caches whatever banner showContextBanner decided to print,
+// so destructive commands can re-emit the same warning right before they ask
+// for confirmation (the original banner can scroll off the screen during a
+// long `kubectl diff`). Empty string means "nothing to show".
+var (
+	activeBannerText  string
+	activeBannerStyle = ui.Banner
+)
+
 func showContextBanner() {
-	if activePolicy.MatchedPattern == "" {
+	activeBannerText = ""
+	activeBannerStyle = ui.Banner
+
+	// Explicit policy wins: it's the user's deliberate choice and may override
+	// the heuristic (e.g. they may want to label `prod-sandbox` as harmless).
+	if activePolicy.MatchedPattern != "" {
+		label := activePolicy.Banner
+		if label == "" {
+			label = "context matches " + activePolicy.MatchedPattern
+		}
+		activeBannerText = " ⚠ " + label + " "
+		fmt.Fprintln(os.Stderr, ui.Render(activeBannerStyle, activeBannerText))
 		return
 	}
-	label := activePolicy.Banner
-	if label == "" {
-		label = "context matches " + activePolicy.MatchedPattern
+
+	// No explicit policy — fall back to the name-based classifier so users get
+	// a warning the first time they switch into a prod-shaped context without
+	// having configured anything.
+	ctx := Flags.Context
+	if ctx == "" {
+		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig}
+		ctx, _ = loader.CurrentContext()
 	}
-	fmt.Fprintln(os.Stderr, ui.Render(ui.Banner, " ⚠ "+label+" "))
+	level := guardrail.ClassifyContext(ctx)
+	if level == guardrail.RiskNone {
+		return
+	}
+	label := guardrail.AutoBannerLabel(level, ctx)
+	activeBannerText = " ⚠ " + label + " "
+	if level == guardrail.RiskCritical {
+		activeBannerStyle = ui.Danger
+	} else {
+		activeBannerStyle = ui.Warning
+	}
+	fmt.Fprintln(os.Stderr, ui.Render(activeBannerStyle, activeBannerText))
+}
+
+// ReshowBanner reprints the most recently rendered context banner. Destructive
+// commands call this just before the confirmation prompt so the warning is
+// visible at the moment of decision, even if a long preview pushed it off
+// screen.
+func ReshowBanner() {
+	if activeBannerText == "" {
+		return
+	}
+	fmt.Fprintln(os.Stderr, ui.Render(activeBannerStyle, activeBannerText))
 }
 
 // persistentPostRunE runs after a subcommand completes (success or error). It
