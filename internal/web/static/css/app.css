@@ -1054,3 +1054,55 @@ body.theme-light .sidebar {
 
 /* Focus visible — accessibility + design polish. */
 :focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--r-sm); }
+
+/* ---- Resource edit page (form + yaml tabs) ---- */
+.tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--fg-subtle);
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.tab:hover { color: var(--fg); }
+.tab.active { color: var(--fg); border-bottom-color: var(--accent); }
+
+.section-head {
+  margin: 14px 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-subtle);
+  font-weight: 700;
+}
+
+/* Two-column key/value rows used by the ConfigMap + Secret forms. The value
+   column flexes; the action button stays tight against the right edge. */
+.kv-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(0, 2.4fr) auto;
+  gap: 8px;
+  align-items: start;
+  margin-bottom: 8px;
+}
+.kv-row .input, .kv-row .textarea { width: 100%; }
+.kv-row .kv-val { min-height: 36px; resize: vertical; }
+.kv-row .btn { align-self: flex-start; margin-top: 2px; }
+
+/* Stacked card for ingress rules / TLS entries — slight border so each one
+   reads as a discrete unit. */
+.ing-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: var(--ink-2);
+}
+
+/* Light monospace tweak for base64 textareas. */
+.textarea.mono { font-family: var(--mono); font-size: 12.5px; }

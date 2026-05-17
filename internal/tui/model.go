@@ -15,7 +15,7 @@ import (
 )
 
 // ProducerFn streams the output of a TUI action into w. ns/name identify the
-// target pod. The cli layer constructs these closures so the TUI doesn't
+// target resource. The cli layer constructs these closures so the TUI doesn't
 // import the kubectl runner or AI provider directly.
 type ProducerFn func(ctx context.Context, ns, name string, w io.Writer) error
 
@@ -27,21 +27,25 @@ type Options struct {
 	BinaryPath string   // os.Executable() resolved at startup
 	ExtraArgs  []string // root-flag pass-through for spawned subprocesses (e.g. ["--kubeconfig", "/path"])
 
-	// Producers for the embedded text pane. The TUI invokes the matching
-	// producer when the user presses d/Y/e/D/y. Any producer left nil falls
-	// back to suspending the TUI and shelling out to the same `sk` subcommand.
+	// Pod-only producers retained from the v0 design — describe / diagnose /
+	// why / events run against pods.
 	Describe ProducerFn
-	YAML     ProducerFn
 	Events   ProducerFn
 	Diagnose ProducerFn
 	Why      ProducerFn
+
+	// YAMLByKind holds the YAML producer per resource kind so `Y` works
+	// regardless of which list the user is browsing. The TUI falls back to
+	// suspending and shelling out to `sk get <kind> <name> -o yaml` if a
+	// kind is missing.
+	YAMLByKind map[Kind]ProducerFn
 }
 
 // Run is the entrypoint called from internal/cli/tui.go.
 func Run(ctx context.Context, opts Options) error {
 	state := NewState()
-	if _, err := StartPodInformer(ctx, opts.Clientset, opts.Namespace, state); err != nil {
-		return fmt.Errorf("start informer: %w", err)
+	if _, err := StartInformers(ctx, opts.Clientset, opts.Namespace, state); err != nil {
+		return fmt.Errorf("start informers: %w", err)
 	}
 	m := newModel(ctx, state, opts)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
@@ -66,16 +70,17 @@ type Model struct {
 	state *State
 	opts  Options
 
-	pods     []PodRow
-	filtered []PodRow
-	cursor   int
-	top      int // viewport top index into filtered
-	w, h     int
+	currentKind Kind
+	rows        []Row // for currentKind
+	filtered    []Row
+	cursor      int
+	top         int // viewport top index into filtered
+	w, h        int
 
 	view view
 
-	// Filter on pod list. Independent of view so user can filter and then
-	// jump into logs / actions on the filtered subset.
+	// Filter on resource list. Independent of view so user can filter and
+	// then jump into logs / actions on the filtered subset.
 	filtering bool
 	filter    string
 
@@ -97,11 +102,12 @@ type Model struct {
 }
 
 type actionMenu struct {
-	pod PodRow
+	row  Row
+	kind Kind
 }
 
 func newModel(ctx context.Context, state *State, opts Options) Model {
-	return Model{ctx: ctx, state: state, opts: opts, view: viewList}
+	return Model{ctx: ctx, state: state, opts: opts, view: viewList, currentKind: KindPod}
 }
 
 func (m Model) Init() tea.Cmd { return tickCmd() }
@@ -120,7 +126,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		m.pods = m.state.Snapshot()
+		m.rows = m.state.SnapshotKind(m.currentKind)
 		m.applyFilter()
 		m.clampCursor()
 		m.lastUpdate = time.Now()
@@ -128,7 +134,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case execDoneMsg:
 		// Subprocess returned. Repaint with the latest informer state.
-		m.pods = m.state.Snapshot()
+		m.rows = m.state.SnapshotKind(m.currentKind)
 		m.applyFilter()
 		if msg.err != nil {
 			m.statusErr = msg.err.Error()
@@ -208,10 +214,38 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.handleListKey(msg)
 }
 
+// switchKind changes the active resource family and resets navigation /
+// filter state so the user lands at the top of the new list.
+func (m *Model) switchKind(k Kind) {
+	if m.currentKind == k {
+		return
+	}
+	m.currentKind = k
+	m.rows = m.state.SnapshotKind(k)
+	m.filter = ""
+	m.filtering = false
+	m.cursor = 0
+	m.top = 0
+	m.applyFilter()
+	m.clampCursor()
+}
+
 func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch s := msg.String(); s {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "1":
+		m.switchKind(KindPod)
+		return m, nil
+	case "2":
+		m.switchKind(KindConfigMap)
+		return m, nil
+	case "3":
+		m.switchKind(KindSecret)
+		return m, nil
+	case "4":
+		m.switchKind(KindIngress)
+		return m, nil
 	case "j", "down":
 		m.cursor++
 	case "k", "up":
@@ -231,52 +265,68 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		m.view = viewHelp
 	case "enter":
-		if pod, ok := m.currentPod(); ok {
-			m.action = &actionMenu{pod: pod}
+		if row, ok := m.currentRow(); ok {
+			m.action = &actionMenu{row: row, kind: m.currentKind}
 		}
 	// Shortcut actions that skip the menu — power-user friendly.
 	case "l":
+		if m.currentKind != KindPod {
+			return m, nil
+		}
 		if pod, ok := m.currentPod(); ok {
 			return m, m.openLogs(pod)
 		}
 	case "d":
+		if m.currentKind != KindPod {
+			return m, nil
+		}
 		if pod, ok := m.currentPod(); ok {
-			return m, m.openText(pod, "describe "+pod.Name, textKindDescribe, m.opts.Describe,
+			return m, m.openText(pod.Namespace, pod.Name, "describe "+pod.Name, textKindDescribe, m.opts.Describe,
 				"describe", "pod", pod.Name)
 		}
 	case "D":
+		if m.currentKind != KindPod {
+			return m, nil
+		}
 		if pod, ok := m.currentPod(); ok {
-			return m, m.openText(pod, "diagnose "+pod.Name, textKindDiagnose, m.opts.Diagnose,
+			return m, m.openText(pod.Namespace, pod.Name, "diagnose "+pod.Name, textKindDiagnose, m.opts.Diagnose,
 				"diagnose", "pod/"+pod.Name)
 		}
 	case "y":
+		if m.currentKind != KindPod {
+			return m, nil
+		}
 		if pod, ok := m.currentPod(); ok {
-			return m, m.openText(pod, "why "+pod.Name, textKindWhy, m.opts.Why,
+			return m, m.openText(pod.Namespace, pod.Name, "why "+pod.Name, textKindWhy, m.opts.Why,
 				"why", "pod/"+pod.Name)
 		}
 	case "Y":
-		if pod, ok := m.currentPod(); ok {
-			return m, m.openText(pod, "yaml "+pod.Name, textKindYAML, m.opts.YAML,
-				"get", "pod", pod.Name, "-o", "yaml")
+		if row, ok := m.currentRow(); ok {
+			return m, m.openYAML(row)
 		}
 	case "e":
-		if pod, ok := m.currentPod(); ok {
-			return m, m.openText(pod, "events "+pod.Name, textKindEvents, m.opts.Events,
-				"get", "events",
-				"--field-selector", "involvedObject.name="+pod.Name,
-				"--sort-by=.lastTimestamp")
+		if m.currentKind == KindPod {
+			return m, nil // edit not exposed for pods in the TUI
+		}
+		if row, ok := m.currentRow(); ok {
+			return m, runExternal(m.subprocessForRow(row, m.currentKind.CLIVerb(), "edit", row.GetName()))
 		}
 	case "x":
+		if m.currentKind != KindPod {
+			return m, nil
+		}
 		if pod, ok := m.currentPod(); ok {
-			return m, runExternal(m.subprocess(pod, "exec", "-it", pod.Name, "--", "sh", "-c",
+			return m, runExternal(m.subprocessForRow(pod, "exec", "-it", pod.Name, "--", "sh", "-c",
 				"command -v bash >/dev/null && exec bash || exec sh"))
 		}
 	case "X":
-		if pod, ok := m.currentPod(); ok {
+		if row, ok := m.currentRow(); ok {
 			m.view = viewConfirmDelete
-			m.action = &actionMenu{pod: pod}
+			m.action = &actionMenu{row: row, kind: m.currentKind}
 			m.deleteInput = ""
 		}
+	case "e_pod":
+		// Kept for future use — pods are not edited in the TUI directly today.
 	}
 	m.clampCursor()
 	return m, nil
@@ -318,60 +368,77 @@ func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleActionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.action == nil {
+		return m, nil
+	}
+	kind := m.action.kind
+	row := m.action.row
 	switch msg.String() {
 	case "esc", "q":
 		m.action = nil
 		return m, nil
-	case "d":
-		pod := m.action.pod
-		m.action = nil
-		return m, m.openText(pod, "describe "+pod.Name, textKindDescribe, m.opts.Describe,
-			"describe", "pod", pod.Name)
-	case "l":
-		pod := m.action.pod
-		m.action = nil
-		return m, m.openLogs(pod)
-	case "D":
-		pod := m.action.pod
-		m.action = nil
-		return m, m.openText(pod, "diagnose "+pod.Name, textKindDiagnose, m.opts.Diagnose,
-			"diagnose", "pod/"+pod.Name)
-	case "y":
-		pod := m.action.pod
-		m.action = nil
-		return m, m.openText(pod, "why "+pod.Name, textKindWhy, m.opts.Why,
-			"why", "pod/"+pod.Name)
 	case "Y":
-		pod := m.action.pod
 		m.action = nil
-		return m, m.openText(pod, "yaml "+pod.Name, textKindYAML, m.opts.YAML,
-			"get", "pod", pod.Name, "-o", "yaml")
-	case "e":
-		pod := m.action.pod
-		m.action = nil
-		return m, m.openText(pod, "events "+pod.Name, textKindEvents, m.opts.Events,
-			"get", "events",
-			"--field-selector", "involvedObject.name="+pod.Name,
-			"--sort-by=.lastTimestamp")
-	case "x":
-		c := m.subprocess(m.action.pod, "exec", "-it", m.action.pod.Name, "--", "sh", "-c",
-			"command -v bash >/dev/null && exec bash || exec sh")
-		m.action = nil
-		return m, runExternal(c)
+		return m, m.openYAML(row)
 	case "X":
 		m.view = viewConfirmDelete
 		m.deleteInput = ""
 		return m, nil
 	}
+	// Pod-only actions: everything below.
+	if kind != KindPod {
+		switch msg.String() {
+		case "e":
+			m.action = nil
+			return m, runExternal(m.subprocessForRow(row, kind.CLIVerb(), "edit", row.GetName()))
+		}
+		return m, nil
+	}
+	pod, ok := row.(PodRow)
+	if !ok {
+		return m, nil
+	}
+	switch msg.String() {
+	case "d":
+		m.action = nil
+		return m, m.openText(pod.Namespace, pod.Name, "describe "+pod.Name, textKindDescribe, m.opts.Describe,
+			"describe", "pod", pod.Name)
+	case "l":
+		m.action = nil
+		return m, m.openLogs(pod)
+	case "D":
+		m.action = nil
+		return m, m.openText(pod.Namespace, pod.Name, "diagnose "+pod.Name, textKindDiagnose, m.opts.Diagnose,
+			"diagnose", "pod/"+pod.Name)
+	case "y":
+		m.action = nil
+		return m, m.openText(pod.Namespace, pod.Name, "why "+pod.Name, textKindWhy, m.opts.Why,
+			"why", "pod/"+pod.Name)
+	case "e":
+		m.action = nil
+		return m, m.openText(pod.Namespace, pod.Name, "events "+pod.Name, textKindEvents, m.opts.Events,
+			"get", "events",
+			"--field-selector", "involvedObject.name="+pod.Name,
+			"--sort-by=.lastTimestamp")
+	case "x":
+		c := m.subprocessForRow(pod, "exec", "-it", pod.Name, "--", "sh", "-c",
+			"command -v bash >/dev/null && exec bash || exec sh")
+		m.action = nil
+		return m, runExternal(c)
+	}
 	return m, nil
 }
 
 func (m Model) handleDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	pod := m.action.pod
+	if m.action == nil {
+		return m, nil
+	}
+	row := m.action.row
+	kind := m.action.kind
 	switch msg.Type {
 	case tea.KeyEnter:
-		if m.deleteInput == pod.Name {
-			c := m.subprocess(pod, "delete", "pod", pod.Name)
+		if m.deleteInput == row.GetName() {
+			c := m.subprocessForRow(row, "delete", deleteResourceArg(kind), row.GetName())
 			m.view = viewList
 			m.action = nil
 			m.deleteInput = ""
@@ -397,6 +464,23 @@ func (m Model) handleDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// deleteResourceArg returns the kubectl resource type token that `sk delete`
+// expects for kind. Pods use the bare `pod`; for the new kinds the singular
+// form maps 1:1.
+func deleteResourceArg(kind Kind) string {
+	switch kind {
+	case KindPod:
+		return "pod"
+	case KindConfigMap:
+		return "configmap"
+	case KindSecret:
+		return "secret"
+	case KindIngress:
+		return "ingress"
+	}
+	return string(kind)
 }
 
 func (m Model) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -488,14 +572,39 @@ func (m Model) handleLogFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // run it as the producer; otherwise we fall back to suspending the TUI and
 // shelling out to `sk` with fallbackArgs so the action still works (older
 // callers without producers wired up still get the legacy behavior).
-func (m *Model) openText(pod PodRow, title string, kind textKind, prod ProducerFn, fallbackArgs ...string) tea.Cmd {
+func (m *Model) openText(ns, name, title string, kind textKind, prod ProducerFn, fallbackArgs ...string) tea.Cmd {
 	if prod == nil {
-		return runExternal(m.subprocess(pod, fallbackArgs[0], fallbackArgs[1:]...))
+		c := exec.Command(m.opts.BinaryPath, append(m.subprocessPrefix(ns), append([]string{fallbackArgs[0]}, fallbackArgs[1:]...)...)...)
+		c.Env = os.Environ()
+		return runExternal(c)
 	}
 	m.view = viewText
 	m.text = newTextPane(title, kind)
 	return m.text.start(m.ctx, func(ctx context.Context, w io.Writer) error {
-		return prod(ctx, pod.Namespace, pod.Name, w)
+		return prod(ctx, ns, name, w)
+	})
+}
+
+// openYAML opens the YAML view for any row, choosing the producer registered
+// for the current kind. Falls back to suspending the TUI and shelling out to
+// `sk get <kind> <name> -o yaml` if no producer was wired.
+func (m *Model) openYAML(row Row) tea.Cmd {
+	kind := m.currentKind
+	prod := m.opts.YAMLByKind[kind]
+	title := "yaml " + row.GetName()
+	if prod == nil {
+		c := exec.Command(m.opts.BinaryPath, append(
+			m.subprocessPrefix(row.GetNamespace()),
+			"get", deleteResourceArg(kind), row.GetName(), "-o", "yaml",
+		)...)
+		c.Env = os.Environ()
+		return runExternal(c)
+	}
+	m.view = viewText
+	m.text = newTextPane(title, textKindYAML)
+	ns, name := row.GetNamespace(), row.GetName()
+	return m.text.start(m.ctx, func(ctx context.Context, w io.Writer) error {
+		return prod(ctx, ns, name, w)
 	})
 }
 
@@ -596,15 +705,22 @@ func (m *Model) openLogs(pod PodRow) tea.Cmd {
 	return m.logs.start(m.ctx, m.opts.Clientset)
 }
 
-// subprocess builds an *exec.Cmd invoking the same superkube binary with the
-// chosen verb. We thread the namespace through explicitly so the action
-// inherits the pod's namespace, not whatever the current-context says.
-func (m Model) subprocess(pod PodRow, verb string, args ...string) *exec.Cmd {
+// subprocessPrefix returns the leading argv (namespace + root flags) for a
+// `sk <verb>` invocation. We thread the namespace through explicitly so the
+// action inherits the row's namespace, not whatever the current-context says.
+func (m Model) subprocessPrefix(ns string) []string {
 	argv := []string{}
-	if pod.Namespace != "" {
-		argv = append(argv, "-n", pod.Namespace)
+	if ns != "" {
+		argv = append(argv, "-n", ns)
 	}
 	argv = append(argv, m.opts.ExtraArgs...)
+	return argv
+}
+
+// subprocessForRow builds an *exec.Cmd that invokes the same superkube binary
+// with verb (+ args), inheriting the row's namespace.
+func (m Model) subprocessForRow(row Row, verb string, args ...string) *exec.Cmd {
+	argv := m.subprocessPrefix(row.GetNamespace())
 	argv = append(argv, verb)
 	argv = append(argv, args...)
 	c := exec.Command(m.opts.BinaryPath, argv...)
@@ -620,16 +736,17 @@ func runExternal(c *exec.Cmd) tea.Cmd {
 
 func (m *Model) applyFilter() {
 	if m.filter == "" {
-		m.filtered = m.pods
+		m.filtered = m.rows
 		return
 	}
 	q := strings.ToLower(m.filter)
-	out := make([]PodRow, 0, len(m.pods))
-	for _, p := range m.pods {
-		if strings.Contains(strings.ToLower(p.Name), q) ||
-			strings.Contains(strings.ToLower(p.Namespace), q) ||
-			strings.Contains(strings.ToLower(p.Status), q) {
-			out = append(out, p)
+	out := make([]Row, 0, len(m.rows))
+	for _, r := range m.rows {
+		for _, s := range r.Filterable() {
+			if strings.Contains(strings.ToLower(s), q) {
+				out = append(out, r)
+				break
+			}
 		}
 	}
 	m.filtered = out
@@ -660,11 +777,24 @@ func (m *Model) clampCursor() {
 	}
 }
 
-func (m Model) currentPod() (PodRow, bool) {
+// currentRow returns the currently-selected Row, or false if there is none.
+func (m Model) currentRow() (Row, bool) {
 	if m.cursor < 0 || m.cursor >= len(m.filtered) {
-		return PodRow{}, false
+		return nil, false
 	}
 	return m.filtered[m.cursor], true
+}
+
+// currentPod is the legacy pod-only accessor — only valid when the current
+// kind is KindPod. Returns false if the selected row isn't a pod or no row
+// is selected.
+func (m Model) currentPod() (PodRow, bool) {
+	r, ok := m.currentRow()
+	if !ok {
+		return PodRow{}, false
+	}
+	p, ok := r.(PodRow)
+	return p, ok
 }
 
 // chromeRows is the number of vertical rows consumed by top status bar (3 lines:

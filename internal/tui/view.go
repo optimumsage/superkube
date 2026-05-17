@@ -138,14 +138,17 @@ func (m Model) titleBar() string {
 	return title + strings.Repeat(" ", pad) + right
 }
 
-// statusBar is the second line: context, namespace, counts, error if any.
+// statusBar is the second line: context, namespace, kind tabs, counts,
+// error if any.
 func (m Model) statusBar() string {
 	ns := m.opts.Namespace
 	if ns == "" {
 		ns = "(all)"
 	}
-	left := fmt.Sprintf("ctx %s  ·  ns %s  ·  pods %d/%d",
-		shortOrDash(m.opts.Context), ns, len(m.filtered), len(m.pods))
+	tabs := renderKindTabs(m.currentKind)
+	left := fmt.Sprintf("ctx %s  ·  ns %s  ·  %s  ·  %s %d/%d",
+		shortOrDash(m.opts.Context), ns, tabs,
+		strings.ToLower(m.currentKind.Title()), len(m.filtered), len(m.rows))
 	right := ""
 	if !m.lastUpdate.IsZero() {
 		right = "updated " + m.lastUpdate.Format("15:04:05")
@@ -195,28 +198,47 @@ func (m Model) footer() string {
 	case m.view == viewHelp:
 		return helpLine("?", "close help", "q/esc", "back")
 	case m.action != nil:
+		if m.action.kind == KindPod {
+			return helpLine(
+				"d", "describe",
+				"l", "logs",
+				"D", "diagnose",
+				"y", "why",
+				"Y", "yaml",
+				"e", "events",
+				"x", "exec",
+				"X", "delete",
+				"esc", "cancel",
+			)
+		}
 		return helpLine(
-			"d", "describe",
-			"l", "logs",
-			"D", "diagnose",
-			"y", "why",
 			"Y", "yaml",
-			"e", "events",
-			"x", "exec",
+			"e", "edit",
 			"X", "delete",
 			"esc", "cancel",
 		)
 	case m.view == viewConfirmDelete:
-		return helpLine("type", "pod name", "enter", "confirm", "esc", "cancel")
+		return helpLine("type", "name", "enter", "confirm", "esc", "cancel")
 	default:
+		if m.currentKind == KindPod {
+			return helpLine(
+				"1-4", "kind",
+				"↑↓", "move",
+				"/", "filter",
+				"enter", "actions",
+				"l", "logs",
+				"Y", "yaml",
+				"?", "help",
+				"q", "quit",
+			)
+		}
 		return helpLine(
+			"1-4", "kind",
 			"↑↓", "move",
 			"/", "filter",
-			"enter", "actions",
-			"l", "logs",
-			"d", "describe",
-			"D", "diagnose",
-			"y", "why",
+			"Y", "yaml",
+			"e", "edit",
+			"X", "delete",
 			"?", "help",
 			"q", "quit",
 		)
@@ -272,7 +294,7 @@ func (m Model) renderListView() string {
 
 func (m Model) renderTable(width, height int) string {
 	if len(m.filtered) == 0 {
-		body := styleSubtle.Render("  no pods match")
+		body := styleSubtle.Render("  no " + strings.ToLower(m.currentKind.Title()) + " match")
 		return stylePanel.Width(width - 2).Height(height - 2).Render(body)
 	}
 	inner := width - 4
@@ -280,11 +302,17 @@ func (m Model) renderTable(width, height int) string {
 		inner = 20
 	}
 
-	headers := []string{"NAMESPACE", "NAME", "READY", "STATUS", "RESTARTS", "AGE"}
-	widths := []int{0, 0, 5, 0, 8, 4}
+	extraHeaders := ColHeaders(m.currentKind)
+	headers := append([]string{"NAMESPACE", "NAME"}, extraHeaders...)
+	headers = append(headers, "AGE")
+	widths := make([]int, len(headers))
 	for i, h := range headers {
-		widths[i] = max(widths[i], len(h))
+		widths[i] = len(h)
 	}
+	// Locking the AGE column to a tight width keeps rendering stable across
+	// resizes; namespace + name flex with content.
+	widths[len(widths)-1] = max(widths[len(widths)-1], 4)
+
 	visible := height - 4 // panel border (2) + header row (1) + 1 spacer
 	if visible < 1 {
 		visible = 1
@@ -293,26 +321,57 @@ func (m Model) renderTable(width, height int) string {
 	if end > len(m.filtered) {
 		end = len(m.filtered)
 	}
+
+	// Pre-extract row cells so we can size columns and render in one pass.
+	rowCells := make([][]string, 0, end-m.top)
+	statusFor := make([]string, 0, end-m.top)
 	for _, r := range m.filtered[m.top:end] {
-		widths[0] = max(widths[0], len(r.Namespace))
-		widths[1] = max(widths[1], len(r.Name))
-		widths[3] = max(widths[3], len(r.Status))
+		extras := r.Cols()
+		cells := append([]string{r.GetNamespace(), r.GetName()}, extras...)
+		cells = append(cells, humanAgeRow(r.GetCreated()))
+		rowCells = append(rowCells, cells)
+		// STATUS is the 2nd extra column for pods (index 3 = NAMESPACE,
+		// NAME, READY, STATUS). For other kinds the value passed here is
+		// empty so formatCells skips the colorizer.
+		if m.currentKind == KindPod {
+			if p, ok := r.(PodRow); ok {
+				statusFor = append(statusFor, p.Status)
+			} else {
+				statusFor = append(statusFor, "")
+			}
+		} else {
+			statusFor = append(statusFor, "")
+		}
+		for i, c := range cells {
+			if i < len(widths) && len(c) > widths[i] {
+				widths[i] = len(c)
+			}
+		}
 	}
-	// Constrain name column to leave room for the rest.
-	other := widths[0] + widths[2] + widths[3] + widths[4] + widths[5] + 10
+
+	// Constrain name column so the rest still fits inside `inner`.
+	other := 0
+	for i := range widths {
+		if i == 1 {
+			continue
+		}
+		other += widths[i] + 2
+	}
 	if other < inner {
 		widths[1] = inner - other
 	}
 
 	var b strings.Builder
-	headerRow := formatCells(headers, widths, "")
+	headerRow := formatCells(headers, widths, "", -1)
 	b.WriteString(styleColHeader.Render(headerRow))
 	b.WriteByte('\n')
-	for i, r := range m.filtered[m.top:end] {
-		row := formatCells([]string{
-			r.Namespace, truncate(r.Name, widths[1]), r.Ready, r.Status,
-			itoa(int(r.Restarts)), humanAgeRow(r.Created),
-		}, widths, r.Status)
+	statusIdx := -1
+	if m.currentKind == KindPod {
+		statusIdx = 3 // NAMESPACE(0) NAME(1) READY(2) STATUS(3)
+	}
+	for i, cells := range rowCells {
+		cells[1] = truncate(cells[1], widths[1])
+		row := formatCells(cells, widths, statusFor[i], statusIdx)
 		if m.top+i == m.cursor {
 			b.WriteString(styleCursor.Width(inner).Render(row))
 		} else {
@@ -331,32 +390,79 @@ func (m Model) renderDetails(width, height int) string {
 	if inner < 10 {
 		inner = 10
 	}
-	pod, ok := m.currentPod()
+	row, ok := m.currentRow()
 	if !ok {
 		return stylePanel.Width(width - 2).Height(height - 2).Render(
-			styleSubtle.Render("(no pod selected)"))
+			styleSubtle.Render("(no " + strings.ToLower(m.currentKind.Title()) + " selected)"))
 	}
+
 	rows := []string{
 		styleHeader.Render(" details "),
 		"",
-		detailRow("pod", pod.Name, inner),
-		detailRow("namespace", pod.Namespace, inner),
-		detailColoredRow("status", pod.Status, statusColor(pod.Status), inner),
-		detailRow("ready", pod.Ready, inner),
-		detailRow("restarts", itoa(int(pod.Restarts)), inner),
-		detailRow("age", humanAgeRow(pod.Created), inner),
-		detailRow("node", or(pod.Node, "-"), inner),
-		detailRow("ip", or(pod.IP, "-"), inner),
+		detailRow(m.currentKind.CLIVerb(), row.GetName(), inner),
+		detailRow("namespace", row.GetNamespace(), inner),
 	}
-	if len(pod.Containers) > 0 {
-		rows = append(rows, "", styleSubtle.Render("containers"))
-		for _, c := range pod.Containers {
-			rows = append(rows, "  · "+c)
+	switch r := row.(type) {
+	case PodRow:
+		rows = append(rows,
+			detailColoredRow("status", r.Status, statusColor(r.Status), inner),
+			detailRow("ready", r.Ready, inner),
+			detailRow("restarts", itoa(int(r.Restarts)), inner),
+			detailRow("age", humanAgeRow(r.Created), inner),
+			detailRow("node", or(r.Node, "-"), inner),
+			detailRow("ip", or(r.IP, "-"), inner),
+		)
+		if len(r.Containers) > 0 {
+			rows = append(rows, "", styleSubtle.Render("containers"))
+			for _, c := range r.Containers {
+				rows = append(rows, "  · "+c)
+			}
 		}
+	case ConfigMapRow:
+		rows = append(rows,
+			detailRow("data", itoa(r.DataKeys), inner),
+			detailRow("age", humanAgeRow(r.Created), inner),
+		)
+	case SecretRow:
+		rows = append(rows,
+			detailRow("type", r.Type, inner),
+			detailRow("data", itoa(r.DataKeys), inner),
+			detailRow("age", humanAgeRow(r.Created), inner),
+		)
+	case IngressRow:
+		rows = append(rows,
+			detailRow("class", or(r.Class, "-"), inner),
+			detailRow("hosts", or(r.Hosts, "-"), inner),
+			detailRow("age", humanAgeRow(r.Created), inner),
+		)
 	}
 	rows = append(rows, "", styleSubtle.Render("press enter for actions"))
 	body := strings.Join(rows, "\n")
 	return stylePanel.Width(width - 2).Height(height - 2).Render(body)
+}
+
+// renderKindTabs paints a compact "1·Pods 2·CMs 3·Secrets 4·Ing" header that
+// shows the active kind highlighted. Number keys 1-4 switch the active kind.
+func renderKindTabs(active Kind) string {
+	labels := []struct {
+		k     Kind
+		key   string
+		label string
+	}{
+		{KindPod, "1", "Pods"},
+		{KindConfigMap, "2", "CMs"},
+		{KindSecret, "3", "Secrets"},
+		{KindIngress, "4", "Ing"},
+	}
+	parts := make([]string, 0, len(labels))
+	for _, l := range labels {
+		seg := styleHelpKey.Render(l.key) + " " + l.label
+		if l.k == active {
+			seg = styleHeader.Render(" " + l.key + " " + l.label + " ")
+		}
+		parts = append(parts, seg)
+	}
+	return strings.Join(parts, " ")
 }
 
 func detailRow(label, value string, width int) string {
@@ -417,21 +523,31 @@ func (m Model) renderHelp() string {
 	help := strings.Join([]string{
 		styleHeader.Render(" keybindings "),
 		"",
+		styleSubtle.Render("  kinds"),
+		"  " + styleHelpKey.Render("1") + "           Pods",
+		"  " + styleHelpKey.Render("2") + "           ConfigMaps",
+		"  " + styleHelpKey.Render("3") + "           Secrets",
+		"  " + styleHelpKey.Render("4") + "           Ingresses",
+		"",
+		styleSubtle.Render("  navigation"),
 		"  " + styleHelpKey.Render("j / ↓") + "       move down",
 		"  " + styleHelpKey.Render("k / ↑") + "       move up",
 		"  " + styleHelpKey.Render("g / G") + "       jump to top / bottom",
 		"  " + styleHelpKey.Render("ctrl+d/u") + "    half-page down/up",
-		"  " + styleHelpKey.Render("/") + "           filter pods (name / ns / status)",
+		"  " + styleHelpKey.Render("/") + "           filter (name / ns / status)",
 		"  " + styleHelpKey.Render("enter") + "       open action menu",
 		"",
-		styleSubtle.Render("  actions"),
+		styleSubtle.Render("  pod actions"),
 		"  " + styleHelpKey.Render("l") + "           logs (embedded, with filter)",
 		"  " + styleHelpKey.Render("d") + "           describe",
 		"  " + styleHelpKey.Render("D") + "           diagnose (AI)",
 		"  " + styleHelpKey.Render("y") + "           why (AI)",
-		"  " + styleHelpKey.Render("Y") + "           yaml",
 		"  " + styleHelpKey.Render("e") + "           events",
 		"  " + styleHelpKey.Render("x") + "           exec into the pod",
+		"",
+		styleSubtle.Render("  shared actions"),
+		"  " + styleHelpKey.Render("Y") + "           yaml view",
+		"  " + styleHelpKey.Render("e") + "           edit in $EDITOR  (cm/secret/ingress)",
 		"  " + styleHelpKey.Render("X") + "           delete (typed-name confirm)",
 		"",
 		"  " + styleHelpKey.Render("?") + "           toggle this help",
@@ -444,21 +560,30 @@ func (m Model) renderActionMenu() string {
 	if m.action == nil {
 		return ""
 	}
-	p := m.action.pod
+	r := m.action.row
 	rows := []string{
-		styleHeader.Render(" " + p.Namespace + "/" + p.Name + " "),
+		styleHeader.Render(" " + r.GetNamespace() + "/" + r.GetName() + " "),
 		"",
-		actionRow("l", "logs (in-tui)"),
-		actionRow("d", "describe"),
-		actionRow("D", "diagnose (AI)"),
-		actionRow("y", "why (AI)"),
-		actionRow("Y", "yaml"),
-		actionRow("e", "events"),
-		actionRow("x", "exec"),
-		actionRow("X", styleErr.Render("delete")),
-		"",
-		styleSubtle.Render("  esc to cancel"),
 	}
+	if m.action.kind == KindPod {
+		rows = append(rows,
+			actionRow("l", "logs (in-tui)"),
+			actionRow("d", "describe"),
+			actionRow("D", "diagnose (AI)"),
+			actionRow("y", "why (AI)"),
+			actionRow("Y", "yaml"),
+			actionRow("e", "events"),
+			actionRow("x", "exec"),
+			actionRow("X", styleErr.Render("delete")),
+		)
+	} else {
+		rows = append(rows,
+			actionRow("Y", "yaml"),
+			actionRow("e", "edit in $EDITOR"),
+			actionRow("X", styleErr.Render("delete")),
+		)
+	}
+	rows = append(rows, "", styleSubtle.Render("  esc to cancel"))
 	body := strings.Join(rows, "\n")
 	return stylePanelFocus.Padding(0, 2).Render(body)
 }
@@ -471,14 +596,15 @@ func (m Model) renderDeleteConfirm() string {
 	if m.action == nil {
 		return ""
 	}
-	p := m.action.pod
+	r := m.action.row
+	kind := m.action.kind
 	height := m.tableHeight()
 	rows := []string{
-		styleErr.Render(" delete pod "),
+		styleErr.Render(" delete " + kind.CLIVerb() + " "),
 		"",
-		"  " + p.Namespace + "/" + styleErr.Render(p.Name),
+		"  " + r.GetNamespace() + "/" + styleErr.Render(r.GetName()),
 		"",
-		"  " + styleSubtle.Render("type the pod name to confirm:"),
+		"  " + styleSubtle.Render("type the "+kind.CLIVerb()+" name to confirm:"),
 		"",
 		"    " + m.deleteInput + cursorPipe(),
 	}
@@ -509,16 +635,16 @@ func overlayBottomRight(base, overlay string, w, h int) string {
 }
 
 // formatCells joins each cell padded to its column width, separated by two
-// spaces. statusColumn applies the per-row color to the STATUS field — the
-// 4th column (index 3) in our schema.
-func formatCells(cells []string, widths []int, statusFor string) string {
+// spaces. statusCol is the column index that gets the per-row color (use -1
+// to disable). statusFor is the raw status string used to select the color.
+func formatCells(cells []string, widths []int, statusFor string, statusCol int) string {
 	var sb strings.Builder
 	for i, c := range cells {
 		if i >= len(widths) {
 			break
 		}
 		cell := c
-		if i == 3 && statusFor != "" {
+		if i == statusCol && statusFor != "" {
 			cell = statusColor(statusFor).Render(c)
 		}
 		sb.WriteString(cell)

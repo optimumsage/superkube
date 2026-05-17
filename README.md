@@ -163,19 +163,44 @@ Anything that needs scripting compatibility — `-o json|yaml|name|jsonpath`, pi
 
 ### Full-screen TUI (`sk tui`)
 
-A bubbletea-powered Pods browser, live-updating via a client-go informer.
+A bubbletea-powered browser for Pods, ConfigMaps, Secrets, and Ingresses, live-updating via client-go informers.
 
 | Key | Action |
 |---|---|
+| `1` / `2` / `3` / `4` | switch list: Pods / ConfigMaps / Secrets / Ingresses |
 | `j` / `k` (or arrows) | move cursor |
 | `g` / `G` | jump to top / bottom |
-| `/` | filter pods by name (esc clears) |
-| `enter` | open action menu for the selected pod |
-| `a` / `l` / `d` (in menu) | describe / logs `-f` / diagnose |
+| `/` | filter rows (esc clears) |
+| `enter` | open action menu for the selected row |
+| `Y` | show the resource YAML (Secret values stay masked) |
+| `e` | open `sk <kind> edit` in `$EDITOR` (ConfigMap/Secret/Ingress) |
+| `X` | delete with typed-name confirmation |
+| `l` / `d` / `D` / `y` / `e` (Pods only) | logs / describe / diagnose / why / events |
+| `x` (Pods only) | exec into the pod |
 | `?` | toggle help overlay |
 | `q` or `ctrl+c` | quit |
 
-Actions suspend the TUI, shell back into the matching `sk` subcommand (`sk describe`, `sk logs`, `sk diagnose`) so you get the same redaction, AI provider, and audit-log entry as if you'd typed the command directly. The TUI scope follows `-n` / `--namespace`; omit for all namespaces.
+Actions suspend the TUI and shell back into the matching `sk` subcommand (`sk describe`, `sk logs`, `sk configmap edit`, `sk delete configmap`, …) so you get the same policy gate, redaction, AI provider, and audit-log entry as if you'd typed the command directly. The TUI scope follows `-n` / `--namespace`; omit for all namespaces.
+
+### ConfigMaps, Secrets, Ingresses (`sk configmap`, `sk secret`, `sk ingress`)
+
+First-class view + edit verbs for the three most-edited Kubernetes objects, with aliases (`cm`, `sec`, `ing`), policy gating, and audit:
+
+```sh
+sk configmap view feature-flags             # styled YAML for the ConfigMap
+sk cm edit feature-flags                    # opens kubectl edit; policy + audit apply
+sk secret view db-credentials               # values masked: <base64 hidden — pass --reveal>
+sk secret view db-credentials --reveal      # base64-decoded values printed
+sk secret view db-credentials --reveal > t  # refuses in non-TTY without --yes
+sk ingress view web --reveal                # (no effect; --reveal is secret-only)
+sk ing edit web                             # edit the Ingress in $EDITOR
+```
+
+Notes:
+
+- `--reveal` decodes values from `data:`. To prevent accidental leaks into recorded sessions, files, or shared screens, non-TTY callers must add `--yes` to confirm intent.
+- `edit` shells out to `kubectl edit` so your `$EDITOR` and the usual save-to-apply flow are preserved. Forbid policy rules (next section) block edits exactly like they block deletes.
+- These objects also appear in the TUI (press `2`, `3`, `4`) and in the web UI (sidebar entries).
 
 ### Web interface (`sk web`)
 
@@ -185,7 +210,14 @@ A modern, browser-based control plane for the same superkube features. Launch it
 sk web
 ```
 
-The default opens `http://127.0.0.1:<auto-port>` in your browser. Every CLI verb has a screen — pods (live), workloads, services, nodes, logs (single, multi-pod, and AI-summarized), apply with diff preview, delete/scale/rollout/drain/cordon with the same typed-name and typed-phrase confirmations, port-forward manager, audit log viewer (filterable + follow), AI chat (`sk ai explain`), diagnose / why, config editor, and an embedded xterm.js terminal for pod exec.
+The default opens `http://127.0.0.1:<auto-port>` in your browser. Every CLI verb has a screen — pods (live), workloads, services, nodes, **ConfigMaps / Secrets / Ingresses** (live + inline edit), logs (single, multi-pod, and AI-summarized), apply with diff preview, delete/scale/rollout/drain/cordon with the same typed-name and typed-phrase confirmations, port-forward manager, audit log viewer (filterable + follow), AI chat (`sk ai explain`), diagnose / why, config editor, and an embedded xterm.js terminal for pod exec.
+
+For ConfigMaps, Secrets, and Ingresses, clicking a row opens an editor with two modes — **Form** (the default) and **YAML** — and a per-tab View/Edit toggle:
+
+- **Form view** — kind-specific rendering: ConfigMap key/value pairs (multi-line aware), Secret keys with a *Show decoded values* toggle (encoding back to base64 is handled on save), Ingress class + TLS entries + rules with editable host / path / pathType / backend service-and-port. View mode is read-only; flipping to Edit mode unlocks every input and exposes add/remove buttons for entries.
+- **YAML view / edit** — the original textarea + diff preview. Useful for keys/fields the form doesn't surface, or for paste-in workflows. Secret YAML has a *Decode base64 values* reveal toggle, recorded in the audit log.
+
+Both modes converge on the same flow: **Preview diff** runs a server-side `kubectl diff` and **Confirm & apply** consumes a single-use 30-second token (same `ptyConfirmStore` the destructive actions use — no token, no apply). The form-edit path merges the user's changes into a typed `corev1.ConfigMap` / `corev1.Secret` / `networkingv1.Ingress` populated from the live YAML, so metadata, annotations, and any spec fields the UI doesn't expose round-trip untouched.
 
 | Flag | Default | Notes |
 |---|---|---|

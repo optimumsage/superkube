@@ -1,0 +1,261 @@
+{{define "resource_edit.html"}}
+<section class="page slide-up" x-data="ResourceEditPage('{{.Kind}}', '{{.Namespace}}', '{{.Name}}')">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">{{.KindTitle}} · <span class="mono" x-text="name"></span></h1>
+      <p class="page-sub">
+        <span>Namespace <span class="mono" x-text="ns"></span></span>
+        <span class="subtle">·</span>
+        <span x-text="status"></span>
+      </p>
+    </div>
+    <div class="page-actions">
+      <button class="btn btn-ghost btn-sm" @click="reload()" :disabled="busy" title="Refetch the live object from the cluster">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-refresh"/></svg>
+        Reload
+      </button>
+    </div>
+  </header>
+
+  <!-- Tab bar: Form | YAML.  Form is default; YAML is the textarea+diff flow. -->
+  <div class="tabs" role="tablist" style="display:flex; gap:6px; border-bottom:1px solid var(--border); margin-bottom:14px;">
+    <button class="tab" :class="tab==='form' && 'active'" @click="tab='form'">Form</button>
+    <button class="tab" :class="tab==='yaml' && 'active'" @click="tab='yaml'">YAML</button>
+    <div style="flex:1"></div>
+    <template x-if="tab==='form'">
+      <button class="btn btn-ghost btn-sm" @click="toggleEditMode()" :disabled="busy || !form">
+        <svg class="icon icon-sm" aria-hidden="true"><use :href="editing ? '#i-eye' : '#i-edit'"/></svg>
+        <span x-text="editing ? 'View only' : 'Edit'"></span>
+      </button>
+    </template>
+  </div>
+
+  <!-- ============ FORM TAB ============ -->
+  <div x-show="tab==='form'">
+    <template x-if="!form && !busy">
+      <p class="muted">No form view available for this resource — switch to the YAML tab.</p>
+    </template>
+
+    <!-- ConfigMap form -->
+    <template x-if="form && kindCanonical==='configmap'">
+      <div>
+        <h2 class="section-head">Data</h2>
+        <template x-if="form.data.length === 0">
+          <p class="muted">No data keys.</p>
+        </template>
+        <template x-for="(kv, idx) in form.data" :key="'cm-d-'+idx">
+          <div class="kv-row">
+            <input class="input" :readonly="!editing" placeholder="key" x-model="kv.key" />
+            <textarea class="textarea kv-val" :readonly="!editing" placeholder="value" x-model="kv.value" rows="2"></textarea>
+            <button class="btn btn-ghost btn-sm" :disabled="!editing" @click="form.data.splice(idx,1)" title="Remove key">
+              <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+            </button>
+          </div>
+        </template>
+        <template x-if="editing">
+          <button class="btn btn-ghost btn-sm" @click="form.data.push({key:'',value:''})">+ Add key</button>
+        </template>
+
+        <template x-if="(form.binaryData && form.binaryData.length>0) || editing">
+          <div style="margin-top:24px;">
+            <h2 class="section-head">Binary data <span class="muted">(base64-encoded)</span></h2>
+            <template x-for="(kv, idx) in (form.binaryData || [])" :key="'cm-b-'+idx">
+              <div class="kv-row">
+                <input class="input" :readonly="!editing" placeholder="key" x-model="kv.key" />
+                <textarea class="textarea kv-val mono" :readonly="!editing" placeholder="base64" x-model="kv.value" rows="2"></textarea>
+                <button class="btn btn-ghost btn-sm" :disabled="!editing" @click="form.binaryData.splice(idx,1)">
+                  <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+                </button>
+              </div>
+            </template>
+            <template x-if="editing">
+              <button class="btn btn-ghost btn-sm" @click="form.binaryData ||= []; form.binaryData.push({key:'',value:''})">+ Add binary key</button>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <!-- Secret form -->
+    <template x-if="form && kindCanonical==='secret'">
+      <div>
+        <div class="row" style="align-items:baseline; gap:18px; margin-bottom:10px;">
+          <div>
+            <label class="muted">Type</label>
+            <input class="input" :readonly="!editing" x-model="form.type" style="width:240px;" />
+          </div>
+          <label class="row" style="gap:8px; cursor:pointer; align-self:end;">
+            <input type="checkbox" x-model="revealAll" />
+            <span>Show decoded values</span>
+          </label>
+        </div>
+
+        <h2 class="section-head">Data</h2>
+        <template x-if="form.data.length === 0">
+          <p class="muted">No data keys.</p>
+        </template>
+        <template x-for="(kv, idx) in form.data" :key="'sec-d-'+idx">
+          <div class="kv-row">
+            <input class="input" :readonly="!editing" placeholder="key" x-model="kv.key" />
+            <template x-if="revealAll">
+              <textarea class="textarea kv-val" :readonly="!editing" placeholder="value" x-model="kv.value" rows="2"></textarea>
+            </template>
+            <template x-if="!revealAll">
+              <input class="input kv-val" type="password" :readonly="!editing" :value="kv.value" @input="kv.value = $event.target.value" />
+            </template>
+            <button class="btn btn-ghost btn-sm" :disabled="!editing" @click="form.data.splice(idx,1)">
+              <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+            </button>
+          </div>
+        </template>
+        <template x-if="editing">
+          <button class="btn btn-ghost btn-sm" @click="form.data.push({key:'',value:''})">+ Add key</button>
+        </template>
+        <p class="muted" style="margin-top:8px;">Values are stored as base64 in the Secret manifest; superkube encodes them for you on save.</p>
+      </div>
+    </template>
+
+    <!-- Ingress form -->
+    <template x-if="form && kindCanonical==='ingress'">
+      <div>
+        <div class="row" style="gap:18px; margin-bottom:14px;">
+          <div style="flex:1; max-width:320px;">
+            <label class="muted">Ingress class</label>
+            <input class="input" :readonly="!editing" placeholder="(none)" x-model="form.ingressClassName" />
+          </div>
+        </div>
+
+        <h2 class="section-head">TLS</h2>
+        <template x-if="(form.tls || []).length === 0">
+          <p class="muted">No TLS entries.</p>
+        </template>
+        <template x-for="(tls, idx) in (form.tls || [])" :key="'ing-tls-'+idx">
+          <div class="ing-card">
+            <div class="row" style="gap:10px;">
+              <div style="flex:1;">
+                <label class="muted">Hosts (comma-separated)</label>
+                <input class="input" :readonly="!editing" :value="tls.hosts.join(', ')" @input="tls.hosts = $event.target.value.split(',').map(s=>s.trim()).filter(Boolean)" />
+              </div>
+              <div style="flex:1;">
+                <label class="muted">Secret name</label>
+                <input class="input" :readonly="!editing" x-model="tls.secretName" />
+              </div>
+              <button class="btn btn-ghost btn-sm" :disabled="!editing" @click="form.tls.splice(idx,1)" style="align-self:flex-end;">
+                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+              </button>
+            </div>
+          </div>
+        </template>
+        <template x-if="editing">
+          <button class="btn btn-ghost btn-sm" @click="form.tls ||= []; form.tls.push({hosts:[], secretName:''})">+ Add TLS entry</button>
+        </template>
+
+        <h2 class="section-head" style="margin-top:20px;">Rules</h2>
+        <template x-if="form.rules.length === 0">
+          <p class="muted">No rules defined.</p>
+        </template>
+        <template x-for="(rule, idx) in form.rules" :key="'ing-rule-'+idx">
+          <div class="ing-card">
+            <div class="row" style="gap:10px;">
+              <div style="flex:1;">
+                <label class="muted">Host</label>
+                <input class="input" :readonly="!editing" placeholder="(any)" x-model="rule.host" />
+              </div>
+              <button class="btn btn-ghost btn-sm" :disabled="!editing" @click="form.rules.splice(idx,1)" style="align-self:flex-end;">
+                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+              </button>
+            </div>
+            <h3 class="section-head" style="font-size:12px; margin-top:14px;">Paths</h3>
+            <template x-for="(p, pi) in rule.paths" :key="'ing-path-'+idx+'-'+pi">
+              <div class="row" style="gap:8px; margin-bottom:8px; flex-wrap:wrap;">
+                <input class="input" :readonly="!editing" placeholder="path" x-model="p.path" style="flex:1; min-width:140px;" />
+                <select class="input" :disabled="!editing" x-model="p.pathType" style="flex:0 0 auto; max-width:200px;">
+                  <option value="ImplementationSpecific">ImplementationSpecific</option>
+                  <option value="Exact">Exact</option>
+                  <option value="Prefix">Prefix</option>
+                </select>
+                <template x-if="p.backend">
+                  <input class="input" :readonly="!editing" placeholder="service name" x-model="p.backend.serviceName" style="flex:1; min-width:140px;" />
+                </template>
+                <template x-if="p.backend">
+                  <input class="input" :readonly="!editing" placeholder="port" x-model="p.backend.servicePort" style="flex:0 0 auto; width:96px;" />
+                </template>
+                <button class="btn btn-ghost btn-sm" :disabled="!editing" @click="rule.paths.splice(pi,1)">
+                  <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+                </button>
+              </div>
+            </template>
+            <template x-if="editing">
+              <button class="btn btn-ghost btn-sm" @click="rule.paths.push({path:'/', pathType:'Prefix', backend:{serviceName:'', servicePort:''}})">+ Add path</button>
+            </template>
+          </div>
+        </template>
+        <template x-if="editing">
+          <button class="btn btn-ghost btn-sm" @click="form.rules.push({host:'', paths:[]})">+ Add rule</button>
+        </template>
+      </div>
+    </template>
+
+    <!-- Form-mode actions: preview + commit. Hidden when only viewing. -->
+    <template x-if="editing && form">
+      <div class="row" style="margin-top:22px;">
+        <button class="btn" @click="previewForm()" :disabled="busy">
+          <template x-if="!busy"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye"/></svg></template>
+          <template x-if="busy"><span class="spinner spinner-sm" style="border-color: rgba(255,255,255,0.4); border-top-color: white;"></span></template>
+          <span x-text="busy ? 'Working…' : 'Preview diff'"></span>
+        </button>
+        <span class="muted" x-text="statusDetail"></span>
+      </div>
+    </template>
+  </div>
+
+  <!-- ============ YAML TAB ============ -->
+  <div x-show="tab==='yaml'">
+    <template x-if="kindCanonical==='secret'">
+      <div class="field" style="margin-bottom: 10px;">
+        <label class="row" style="gap:8px; cursor:pointer;">
+          <input type="checkbox" x-model="reveal" @change="reloadYAML()" />
+          <span>Decode base64 values (reveal)</span>
+        </label>
+        <p class="muted">Off = raw base64 (kubectl default).  On = decoded for editing.</p>
+      </div>
+    </template>
+
+    <div class="field">
+      <label>Manifest YAML</label>
+      <textarea class="textarea" x-model="yaml" :disabled="busy" placeholder="Loading…" style="min-height: 360px;"></textarea>
+    </div>
+
+    <div class="row">
+      <button class="btn" @click="previewYAML()" :disabled="busy || !yaml.trim()">
+        <template x-if="!busy"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye"/></svg></template>
+        <template x-if="busy"><span class="spinner spinner-sm" style="border-color: rgba(255,255,255,0.4); border-top-color: white;"></span></template>
+        <span x-text="busy ? 'Working…' : 'Preview diff'"></span>
+      </button>
+      <span class="muted" x-text="statusDetail"></span>
+    </div>
+  </div>
+
+  <!-- ============ Diff + Confirm (shared by both tabs) ============ -->
+  <div x-show="diff" class="fade-in" style="margin-top:22px;">
+    <h2 class="section-head">Diff</h2>
+    <pre class="diff" x-html="diff"></pre>
+    <div class="row" style="margin-top:14px;">
+      <button class="btn btn-danger" @click="commit()" :disabled="busy">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-check"/></svg>
+        Confirm &amp; apply
+      </button>
+      <button class="btn btn-ghost" @click="cancelPreview()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+        Discard preview
+      </button>
+    </div>
+    <template x-if="applyOut">
+      <div style="margin-top:18px;">
+        <h2 class="section-head">Apply output</h2>
+        <pre class="code" x-text="applyOut"></pre>
+      </div>
+    </template>
+  </div>
+</section>
+{{end}}

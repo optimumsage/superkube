@@ -126,9 +126,25 @@ func (s *Server) apiResourceDescribe(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiResourceYAML returns the resource's full YAML manifest as it lives in
-// the cluster.
+// the cluster. For secrets, `?reveal=1` base64-decodes the `data:` values
+// (otherwise the raw YAML — base64 strings — is returned untouched, matching
+// what kubectl prints).
 func (s *Server) apiResourceYAML(w http.ResponseWriter, r *http.Request) {
-	s.captureKubectlText(w, r, []string{"get", r.PathValue("kind"), r.PathValue("name"), "-n", r.PathValue("ns"), "-o", "yaml"})
+	kind := r.PathValue("kind")
+	if isSecretKind(kind) && r.URL.Query().Get("reveal") == "1" {
+		s.apiSecretYAMLRevealed(w, r)
+		return
+	}
+	s.captureKubectlText(w, r, []string{"get", kind, r.PathValue("name"), "-n", r.PathValue("ns"), "-o", "yaml"})
+}
+
+// isSecretKind returns true for any kubectl-flavored secret kind spelling.
+func isSecretKind(k string) bool {
+	switch k {
+	case "secret", "secrets":
+		return true
+	}
+	return false
 }
 
 // apiResourceEvents lists events for the resource using kubectl events --for.

@@ -97,6 +97,7 @@
           [/^\/$/, '/frag/dashboard'],
           [/^\/pods\/([^/]+)\/([^/]+)$/, (m) => `/frag/pod/${m[1]}/${m[2]}`],
           [/^\/pods$/, '/frag/pods'],
+          [/^\/resources\/([^/]+)\/([^/]+)\/([^/]+)\/edit$/, (m) => `/frag/resources/${m[1]}/${m[2]}/${m[3]}/edit`],
           [/^\/resources\/([^/]+)$/, (m) => `/frag/resources/${m[1]}`],
           [/^\/apply$/, '/frag/apply'],
           [/^\/logs\/multi$/, '/frag/logs-multi'],
@@ -368,11 +369,220 @@
         return '';
       },
       openYAML(row) {
-        const name = row[0];
-        Alpine.$data(document.body).toast('YAML: sk get ' + this.kind + '/' + name + ' -o yaml', 'info');
+        const app = Alpine.$data(document.body);
+        const name = rowField(this.headers, row, 'name') || row[0];
+        const ns = rowField(this.headers, row, 'namespace') || app.ns || '';
+        if (!name) return;
+        // For editable kinds we route to the inline edit page (textarea +
+        // diff preview + confirm). Non-editable kinds still get a YAML
+        // toast — the row click stays useful for browsing.
+        if (isEditableKind(this.kind)) {
+          const path = '/resources/' + this.kind + '/' + (ns || '_') + '/' + name + '/edit';
+          htmx.ajax('GET', '/frag/resources/' + this.kind + '/' + (ns || '_') + '/' + name + '/edit',
+            { target: '#main', push: true });
+          history.replaceState({}, '', path);
+          return;
+        }
+        app.toast('YAML: sk get ' + this.kind + '/' + name + ' -o yaml', 'info');
       },
     };
   };
+
+  // Helpers for the resources table — extract a column by header name.
+  function rowField(headers, row, wantHeader) {
+    if (!headers || !row) return '';
+    const want = String(wantHeader).toLowerCase();
+    for (let i = 0; i < headers.length; i++) {
+      if (String(headers[i] || '').toLowerCase() === want) return row[i] || '';
+    }
+    return '';
+  }
+  function isEditableKind(kind) {
+    return ['configmaps', 'configmap', 'cm',
+            'secrets', 'secret',
+            'ingresses', 'ingress', 'ing',
+            'deployments', 'deployment',
+            'services', 'service', 'svc'].includes(kind);
+  }
+
+  window.ResourceEditPage = function (kind, ns, name) {
+    return {
+      kind, ns, name,
+      // Canonical short name used for kind-specific branches in the template.
+      kindCanonical: canonicalKind(kind),
+      tab: 'form',     // 'form' | 'yaml'
+      editing: false,  // form tab: view vs edit
+      reveal: false,   // yaml tab: secret base64 reveal
+      revealAll: false, // form tab (secret): show decoded values as text
+      form: null,      // structured form payload (per-kind shape)
+      originalYAML: '',
+      yaml: '',        // textarea-mode buffer (yaml tab)
+      diff: '', applyOut: '', confirmToken: '',
+      status: 'loading…', statusDetail: '',
+      busy: false,
+
+      get isSecret() { return this.kindCanonical === 'secret'; },
+
+      async init() { await this.reload(); },
+
+      // Reload pulls the live object and refreshes both the form and YAML
+      // representations. The form is the canonical view; the YAML tab is just
+      // a textarea over the same response.
+      async reload() {
+        this.busy = true; this.diff = ''; this.applyOut = ''; this.confirmToken = '';
+        this.status = 'loading…'; this.statusDetail = '';
+        try {
+          // Form first (also returns yaml). Falls back to a yaml-only flow
+          // when the server has no form for this kind.
+          const r = await fetch('/api/v1/resources/' + this.kind + '/' + this.ns + '/' + this.name + '/form');
+          if (r.ok) {
+            const d = await r.json();
+            this.form = d.form || null;
+            this.originalYAML = d.yaml || '';
+            // Initial YAML buffer for the YAML tab is the cluster's truth;
+            // secret reveal is handled by a separate fetch in reloadYAML().
+            await this.reloadYAML();
+            this.status = 'ready';
+          } else {
+            await this.reloadYAML();
+            this.status = r.status === 404 ? 'no form for this kind' : ('load failed: HTTP ' + r.status);
+          }
+        } catch (e) {
+          this.status = 'load failed';
+          this.statusDetail = String(e.message || e);
+        } finally {
+          this.busy = false;
+        }
+      },
+
+      // reloadYAML re-fetches the YAML tab buffer. Secrets honor the reveal
+      // checkbox via ?reveal=1; everything else fetches once.
+      async reloadYAML() {
+        try {
+          let url = '/api/v1/resources/' + this.kind + '/' + this.ns + '/' + this.name + '/yaml';
+          if (this.isSecret && this.reveal) url += '?reveal=1';
+          const r = await fetch(url);
+          this.yaml = await r.text();
+        } catch (e) {
+          this.statusDetail = String(e.message || e);
+        }
+      },
+
+      toggleEditMode() {
+        this.editing = !this.editing;
+        this.diff = ''; this.confirmToken = '';
+        this.status = this.editing ? 'editing — make changes, then preview' : 'view only';
+      },
+
+      // previewForm posts the structured form to /edit/preview alongside the
+      // original yaml so the server can merge before diffing.
+      async previewForm() {
+        if (!this.form) return;
+        this.busy = true; this.diff = ''; this.applyOut = ''; this.confirmToken = '';
+        this.status = 'computing diff…'; this.statusDetail = '';
+        try {
+          const r = await fetch('/api/v1/resources/' + this.kind + '/' + this.ns + '/' + this.name + '/edit/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': readCookie('sk_csrf') },
+            body: JSON.stringify({ form: this.form, original_yaml: this.originalYAML }),
+          });
+          const d = await r.json();
+          if (!r.ok) {
+            this.status = 'preview failed';
+            this.statusDetail = d.error || d.forbid_reason || ('HTTP ' + r.status);
+            return;
+          }
+          if (d.status === 'no_changes') { this.status = 'no changes'; return; }
+          this.diff = d.diff_html || d.diff || '';
+          this.confirmToken = d.confirm_token || '';
+          this.status = 'review the diff, then confirm';
+        } catch (e) {
+          this.status = 'preview failed';
+          this.statusDetail = String(e.message || e);
+        } finally {
+          this.busy = false;
+        }
+      },
+
+      // previewYAML posts the raw textarea contents.
+      async previewYAML() {
+        this.busy = true; this.diff = ''; this.applyOut = ''; this.confirmToken = '';
+        this.status = 'computing diff…'; this.statusDetail = '';
+        try {
+          const r = await fetch('/api/v1/resources/' + this.kind + '/' + this.ns + '/' + this.name + '/edit/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': readCookie('sk_csrf') },
+            body: JSON.stringify({ yaml: this.yaml }),
+          });
+          const d = await r.json();
+          if (!r.ok) {
+            this.status = 'preview failed';
+            this.statusDetail = d.error || d.forbid_reason || ('HTTP ' + r.status);
+            return;
+          }
+          if (d.status === 'no_changes') { this.status = 'no changes'; return; }
+          this.diff = d.diff_html || d.diff || '';
+          this.confirmToken = d.confirm_token || '';
+          this.status = 'review the diff, then confirm';
+        } catch (e) {
+          this.status = 'preview failed';
+          this.statusDetail = String(e.message || e);
+        } finally {
+          this.busy = false;
+        }
+      },
+
+      // commit consumes the token and applies the YAML or form-derived YAML.
+      // The same endpoint accepts either body shape; we pass whichever tab
+      // produced the diff.
+      async commit() {
+        if (!this.confirmToken) return;
+        this.busy = true; this.applyOut = ''; this.statusDetail = '';
+        const body = (this.tab === 'form')
+          ? { form: this.form, original_yaml: this.originalYAML, confirm_token: this.confirmToken }
+          : { yaml: this.yaml, confirm_token: this.confirmToken };
+        try {
+          const r = await fetch('/api/v1/resources/' + this.kind + '/' + this.ns + '/' + this.name + '/edit/commit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': readCookie('sk_csrf') },
+            body: JSON.stringify(body),
+          });
+          const d = await r.json();
+          this.applyOut = d.output || '';
+          if (r.ok && d.status === 'applied') {
+            this.status = 'applied';
+            this.confirmToken = '';
+            // Refresh so the form + YAML match what the cluster actually has.
+            setTimeout(() => this.reload(), 200);
+          } else {
+            this.status = 'apply failed';
+            this.statusDetail = d.error || '';
+          }
+        } catch (e) {
+          this.status = 'apply failed';
+          this.statusDetail = String(e.message || e);
+        } finally {
+          this.busy = false;
+        }
+      },
+
+      cancelPreview() {
+        this.diff = ''; this.confirmToken = ''; this.applyOut = '';
+        this.status = this.editing ? 'editing' : 'ready';
+      },
+    };
+  };
+
+  function canonicalKind(k) {
+    switch (k) {
+      case 'cm': case 'configmap': case 'configmaps': return 'configmap';
+      case 'secret': case 'secrets': return 'secret';
+      case 'ing': case 'ingress': case 'ingresses': return 'ingress';
+      case 'deploy': case 'deployment': case 'deployments': return 'deployment';
+      case 'svc': case 'service': case 'services': return 'service';
+    }
+    return k;
+  }
 
   window.PodDetail = function (ns, name) {
     return {

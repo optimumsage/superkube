@@ -131,6 +131,18 @@
           <span class="navicon"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg></span>
           <span class="label">Nodes</span>
         </a>
+        <a class="navlink" :class="path === '/resources/configmaps' && 'active'" hx-get="/frag/resources/configmaps" hx-target="#main" hx-push-url="/resources/configmaps" hx-trigger="click">
+          <span class="navicon"><svg class="icon" aria-hidden="true"><use href="#i-file-text"/></svg></span>
+          <span class="label">ConfigMaps</span>
+        </a>
+        <a class="navlink" :class="path === '/resources/secrets' && 'active'" hx-get="/frag/resources/secrets" hx-target="#main" hx-push-url="/resources/secrets" hx-trigger="click">
+          <span class="navicon"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span>
+          <span class="label">Secrets</span>
+        </a>
+        <a class="navlink" :class="path === '/resources/ingresses' && 'active'" hx-get="/frag/resources/ingresses" hx-target="#main" hx-push-url="/resources/ingresses" hx-trigger="click">
+          <span class="navicon"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg></span>
+          <span class="label">Ingresses</span>
+        </a>
 
         <div class="nav-section">Actions</div>
         <a class="navlink" :class="path === '/apply' && 'active'" hx-get="/frag/apply" hx-target="#main" hx-push-url="/apply" hx-trigger="click">

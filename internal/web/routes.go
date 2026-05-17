@@ -24,6 +24,7 @@ func (s *Server) registerRoutes() {
 	mux.HandleFunc("GET /pods", s.handleIndex)
 	mux.HandleFunc("GET /pods/{ns}/{name}", s.handleIndex)
 	mux.HandleFunc("GET /resources/{kind}", s.handleIndex)
+	mux.HandleFunc("GET /resources/{kind}/{ns}/{name}/edit", s.handleIndex)
 	mux.HandleFunc("GET /apply", s.handleIndex)
 	mux.HandleFunc("GET /logs", s.handleIndex)
 	mux.HandleFunc("GET /logs/multi", s.handleIndex)
@@ -40,6 +41,7 @@ func (s *Server) registerRoutes() {
 	mux.HandleFunc("GET /frag/pods", s.fragPods)
 	mux.HandleFunc("GET /frag/pod/{ns}/{name}", s.fragPodDetail)
 	mux.HandleFunc("GET /frag/resources/{kind}", s.fragResources)
+	mux.HandleFunc("GET /frag/resources/{kind}/{ns}/{name}/edit", s.fragResourceEdit)
 	mux.HandleFunc("GET /frag/apply", s.fragApply)
 	mux.HandleFunc("GET /frag/logs", s.fragLogs)
 	mux.HandleFunc("GET /frag/logs-multi", s.fragLogsMulti)
@@ -61,9 +63,13 @@ func (s *Server) registerRoutes() {
 	mux.HandleFunc("GET /api/v1/resources/{kind}/{ns}/{name}/describe", s.apiResourceDescribe)
 	mux.HandleFunc("GET /api/v1/resources/{kind}/{ns}/{name}/yaml", s.apiResourceYAML)
 	mux.HandleFunc("GET /api/v1/resources/{kind}/{ns}/{name}/events", s.apiResourceEvents)
+	mux.HandleFunc("GET /api/v1/resources/{kind}/{ns}/{name}/form", s.apiResourceForm)
 
 	mux.HandleFunc("POST /api/v1/apply/preview", s.apiApplyPreview)
 	mux.HandleFunc("POST /api/v1/apply/commit", s.apiApplyCommit)
+
+	mux.HandleFunc("POST /api/v1/resources/{kind}/{ns}/{name}/edit/preview", s.apiResourceEditPreview)
+	mux.HandleFunc("POST /api/v1/resources/{kind}/{ns}/{name}/edit/commit", s.apiResourceEditCommit)
 
 	mux.HandleFunc("POST /api/v1/destructive/delete", s.apiDelete)
 	mux.HandleFunc("POST /api/v1/destructive/scale", s.apiScale)

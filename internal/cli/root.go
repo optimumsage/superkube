@@ -179,6 +179,9 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newUpgradeCmd())
 	root.AddCommand(newPortForwardCmd())
 	root.AddCommand(newWebCmd())
+	root.AddCommand(newConfigmapCmd())
+	root.AddCommand(newSecretCmd())
+	root.AddCommand(newIngressCmd())
 
 	// Force cobra to register its completion subcommand now (it's normally
 	// lazy on first Execute()), so our passthrough routing sees it as a known
