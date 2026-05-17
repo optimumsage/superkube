@@ -177,6 +177,30 @@ A bubbletea-powered Pods browser, live-updating via a client-go informer.
 
 Actions suspend the TUI, shell back into the matching `sk` subcommand (`sk describe`, `sk logs`, `sk diagnose`) so you get the same redaction, AI provider, and audit-log entry as if you'd typed the command directly. The TUI scope follows `-n` / `--namespace`; omit for all namespaces.
 
+### Web interface (`sk web`)
+
+A modern, browser-based control plane for the same superkube features. Launch it from a terminal:
+
+```sh
+sk web
+```
+
+The default opens `http://127.0.0.1:<auto-port>` in your browser. Every CLI verb has a screen — pods (live), workloads, services, nodes, logs (single, multi-pod, and AI-summarized), apply with diff preview, delete/scale/rollout/drain/cordon with the same typed-name and typed-phrase confirmations, port-forward manager, audit log viewer (filterable + follow), AI chat (`sk ai explain`), diagnose / why, config editor, and an embedded xterm.js terminal for pod exec.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--port` | `0` | `0` picks a free port |
+| `--bind` | `127.0.0.1` | use `0.0.0.0` only on trusted networks; auto-generates `--token` |
+| `--token` | `""` | required when `--bind` is non-loopback |
+| `--no-open` | `false` | skip auto-opening the browser |
+
+Security notes:
+
+- The default binding is loopback-only with DNS-rebind protection on the `Host` header. A browser tab loaded from `evil.example` (rebound to `127.0.0.1`) cannot reach the server because its tab still sends `Host: evil.example`.
+- State-changing requests carry a per-session CSRF cookie/header pair; HTMX is wired to echo it automatically.
+- All audit, policy, and guardrail rules from the CLI apply identically — `forbid: ["delete --all"]` blocks the web action just as it blocks the CLI one. Typed-name and typed-phrase confirmations appear as focused modals; `--yes` is never bypassed by the UI.
+- Backend assets are vendored and embedded; the binary stays single. No external CDN is contacted.
+
 ### Multi-pod log tail
 
 `sk logs --multi=<target>` streams logs from many pods at once. The target can be:
@@ -284,6 +308,7 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 | `sk ctx clean [--auto] [--preview]` | remove stale contexts: manual picker, or auto-probe `/version` and prune the unreachable ones | confirm |
 | `sk ns [name\|-]` | list / switch / previous namespace | n/a |
 | `sk tui` | full-screen pod browser with describe/logs/diagnose actions | n/a |
+| `sk web [--port N] [--bind addr] [--token T] [--no-open]` | browser-based control plane with parity to every sk verb; localhost-only by default | inherits all |
 | `sk ai explain "<q>"` | free-form AI question with current ctx/ns as light context | n/a |
 | `sk diagnose pod/<name>` | describe + events + logs + owner chain + sibling pods → AI explains | n/a |
 | `sk why pod/<name>` | tighter AI prompt for Pending / CrashLoop / ImagePull / OOM / probe failures | n/a |

@@ -1,0 +1,109 @@
+{{define "dashboard.html"}}
+<section class="page slide-up" x-data="DashboardPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Dashboard</h1>
+      <p class="page-sub">Live overview of <span class="mono" x-text="ctx || '—'"></span> · namespace <span class="mono" x-text="ns || 'all'"></span></p>
+    </div>
+  </header>
+
+  <!-- Stats grid: skeleton while loading, then live cards. -->
+  <template x-if="loading">
+    <div class="cards">
+      <template x-for="i in 4" :key="i">
+        <div class="skel-card">
+          <div class="skel skel-line w30"></div>
+          <div class="skel skel-line w70" style="height:24px"></div>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <template x-if="!loading">
+    <div class="cards">
+      <div class="card stat">
+        <div class="stat-head">
+          <span class="stat-icon"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg></span>
+          <span class="stat-label">Context</span>
+        </div>
+        <span class="stat-value mono" x-text="(ctx || '—')"></span>
+      </div>
+      <div class="card stat">
+        <div class="stat-head">
+          <span class="stat-icon"><svg class="icon" aria-hidden="true"><use href="#i-package"/></svg></span>
+          <span class="stat-label">Namespace</span>
+        </div>
+        <span class="stat-value" x-text="ns || 'all'"></span>
+      </div>
+      <div class="card stat">
+        <div class="stat-head">
+          <span class="stat-icon"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg></span>
+          <span class="stat-label">kubectl</span>
+        </div>
+        <span class="stat-value mono" style="font-size:16px" x-text="kubectlVersion || '—'"></span>
+      </div>
+      <div class="card stat">
+        <div class="stat-head">
+          <span class="stat-icon"><svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg></span>
+          <span class="stat-label">AI provider</span>
+        </div>
+        <span class="stat-value" x-text="ai || 'not detected'"></span>
+      </div>
+    </div>
+  </template>
+
+  <!-- Pod health summary -->
+  <template x-if="!loading && podStats">
+    <div class="cards" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+      <div class="card stat">
+        <div class="stat-head"><span class="stat-label">Pods total</span></div>
+        <span class="stat-value" x-text="podStats.total"></span>
+      </div>
+      <div class="card stat">
+        <div class="stat-head"><span class="stat-label">Running</span></div>
+        <span class="stat-value" style="color: var(--success); -webkit-text-fill-color: var(--success)" x-text="podStats.running"></span>
+      </div>
+      <div class="card stat">
+        <div class="stat-head"><span class="stat-label">Pending / init</span></div>
+        <span class="stat-value" style="color: var(--warning); -webkit-text-fill-color: var(--warning)" x-text="podStats.warning"></span>
+      </div>
+      <div class="card stat">
+        <div class="stat-head"><span class="stat-label">Failing</span></div>
+        <span class="stat-value" style="color: var(--danger); -webkit-text-fill-color: var(--danger)" x-text="podStats.failed"></span>
+      </div>
+    </div>
+  </template>
+
+  <h2 style="margin: 28px 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">Quick actions</h2>
+  <div class="cards-row">
+    <a class="card action" hx-get="/frag/pods" hx-target="#main" hx-push-url="/pods">
+      <div class="card-head">
+        <span class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-cube"/></svg></span>
+        <h3>Pods</h3>
+      </div>
+      <p>Live pod browser with describe / yaml / events / logs / exec.</p>
+    </a>
+    <a class="card action" hx-get="/frag/apply" hx-target="#main" hx-push-url="/apply">
+      <div class="card-head">
+        <span class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg></span>
+        <h3>Apply</h3>
+      </div>
+      <p>Paste YAML, preview a server-side diff, confirm, apply.</p>
+    </a>
+    <a class="card action" hx-get="/frag/ai" hx-target="#main" hx-push-url="/ai">
+      <div class="card-head">
+        <span class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg></span>
+        <h3>Ask AI</h3>
+      </div>
+      <p>Diagnose failing pods or ask cluster questions in plain English.</p>
+    </a>
+    <a class="card action" hx-get="/frag/pf" hx-target="#main" hx-push-url="/pf">
+      <div class="card-head">
+        <span class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg></span>
+        <h3>Port-forward</h3>
+      </div>
+      <p>Start, list, and stop background kubectl port-forwards.</p>
+    </a>
+  </div>
+</section>
+{{end}}

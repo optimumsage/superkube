@@ -1,0 +1,59 @@
+{{define "settings.html"}}
+<section class="page slide-up" x-data="SettingsPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Settings</h1>
+      <p class="page-sub">Per-browser preferences. Cluster-wide policy lives under <a hx-get="/frag/config" hx-target="#main" hx-push-url="/config">Config</a>.</p>
+    </div>
+  </header>
+
+  <div class="cards-row">
+    <div class="card">
+      <div class="card-head">
+        <span class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></span>
+        <h3>Appearance</h3>
+      </div>
+      <div class="field" style="margin-bottom: 0;">
+        <label>Theme</label>
+        <select class="select" style="max-width:240px" x-model="theme" @change="apply()">
+          <option value="auto">Auto (system)</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></span>
+        <h3>About</h3>
+      </div>
+      <template x-if="loading">
+        <div class="col">
+          <span class="skel skel-line w70"></span>
+          <span class="skel skel-line w50"></span>
+        </div>
+      </template>
+      <template x-if="!loading">
+        <p class="muted" style="font-size: 12.5px; line-height: 1.7;">
+          superkube web · <span class="mono" x-text="info.version"></span><br/>
+          kubectl <span class="mono" x-text="info.kubectl || '—'"></span><br/>
+          AI provider <span class="mono" x-text="info.ai || '(none detected)'"></span>
+        </p>
+      </template>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-zap"/></svg></span>
+        <h3>Self-upgrade</h3>
+      </div>
+      <button class="btn btn-ghost btn-sm" @click="checkUpgrade()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-refresh"/></svg>
+        Check for updates
+      </button>
+      <p class="muted" style="margin-top: 10px; font-size: 12.5px;" x-text="upgradeStatus"></p>
+    </div>
+  </div>
+</section>
+{{end}}

@@ -1,0 +1,32 @@
+{{define "config.html"}}
+<section class="page slide-up" x-data="ConfigPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Config</h1>
+      <p class="page-sub">Edit <span class="mono" x-text="path"></span>. Forbid rules apply immediately to subsequent destructive operations.</p>
+    </div>
+  </header>
+
+  <div class="field">
+    <label>config.yaml</label>
+    <template x-if="loading">
+      <div class="skel skel-block" style="height: 360px;"></div>
+    </template>
+    <template x-if="!loading">
+      <textarea class="textarea" style="min-height:380px" x-model="yaml"></textarea>
+    </template>
+  </div>
+
+  <div class="row">
+    <button class="btn" @click="save()" :disabled="loading">
+      <svg class="icon icon-sm" aria-hidden="true"><use href="#i-check"/></svg>
+      Save
+    </button>
+    <button class="btn btn-ghost" @click="reload()">
+      <svg class="icon icon-sm" aria-hidden="true"><use href="#i-refresh"/></svg>
+      Reload from disk
+    </button>
+    <span class="muted" x-text="status"></span>
+  </div>
+</section>
+{{end}}

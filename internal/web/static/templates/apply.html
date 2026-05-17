@@ -1,0 +1,53 @@
+{{define "apply.html"}}
+<section class="page slide-up" x-data="ApplyPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Apply</h1>
+      <p class="page-sub">Paste a manifest. Preview shows the server-side diff before any change is applied.</p>
+    </div>
+  </header>
+
+  <div class="field">
+    <label>Manifest YAML</label>
+    <textarea
+      class="textarea"
+      x-model="yaml"
+      placeholder="apiVersion: apps/v1&#10;kind: Deployment&#10;metadata:&#10;  name: web&#10;..."
+    ></textarea>
+  </div>
+
+  <div class="row">
+    <button class="btn" @click="preview()" :disabled="busy || !yaml.trim()">
+      <template x-if="!busy">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-eye"/></svg>
+      </template>
+      <template x-if="busy">
+        <span class="spinner spinner-sm" style="border-color: rgba(255,255,255,0.4); border-top-color: white;"></span>
+      </template>
+      <span x-text="busy ? 'Working…' : 'Preview diff'"></span>
+    </button>
+    <span class="muted" x-text="status"></span>
+  </div>
+
+  <div x-show="diff" class="fade-in" style="margin-top: 22px;">
+    <h2 style="margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">Diff</h2>
+    <pre class="diff" x-html="diff"></pre>
+    <div class="row" style="margin-top: 14px;">
+      <button class="btn btn-danger" @click="commit()" :disabled="busy">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-check"/></svg>
+        Confirm &amp; apply
+      </button>
+      <button class="btn btn-ghost" @click="reset()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+        Discard
+      </button>
+    </div>
+    <template x-if="applyOut">
+      <div style="margin-top: 18px;">
+        <h2 style="margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">Apply output</h2>
+        <pre class="code" x-text="applyOut"></pre>
+      </div>
+    </template>
+  </div>
+</section>
+{{end}}

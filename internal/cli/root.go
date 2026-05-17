@@ -178,6 +178,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newTUICmd())
 	root.AddCommand(newUpgradeCmd())
 	root.AddCommand(newPortForwardCmd())
+	root.AddCommand(newWebCmd())
 
 	// Force cobra to register its completion subcommand now (it's normally
 	// lazy on first Execute()), so our passthrough routing sees it as a known
@@ -241,15 +242,19 @@ func loadPolicy() {
 // activeBannerText caches whatever banner showContextBanner decided to print,
 // so destructive commands can re-emit the same warning right before they ask
 // for confirmation (the original banner can scroll off the screen during a
-// long `kubectl diff`). Empty string means "nothing to show".
+// long `kubectl diff`). Empty string means "nothing to show". activeBannerKind
+// is a stable identifier ("info"|"warn"|"danger") so non-CLI surfaces can pick
+// matching colors without inspecting the lipgloss style.
 var (
 	activeBannerText  string
 	activeBannerStyle = ui.Banner
+	activeBannerKind  = "info"
 )
 
 func showContextBanner() {
 	activeBannerText = ""
 	activeBannerStyle = ui.Banner
+	activeBannerKind = "info"
 
 	// Explicit policy wins: it's the user's deliberate choice and may override
 	// the heuristic (e.g. they may want to label `prod-sandbox` as harmless).
@@ -279,8 +284,10 @@ func showContextBanner() {
 	activeBannerText = " ⚠ " + label + " "
 	if level == guardrail.RiskCritical {
 		activeBannerStyle = ui.Danger
+		activeBannerKind = "danger"
 	} else {
 		activeBannerStyle = ui.Warning
+		activeBannerKind = "warn"
 	}
 	fmt.Fprintln(os.Stderr, ui.Render(activeBannerStyle, activeBannerText))
 }
@@ -294,6 +301,17 @@ func ReshowBanner() {
 		return
 	}
 	fmt.Fprintln(os.Stderr, ui.Render(activeBannerStyle, activeBannerText))
+}
+
+// ActiveBanner returns the most recently computed banner text and a stable
+// style key ("info" | "warn" | "danger" | ""). Exported so non-CLI surfaces
+// (e.g. the web UI) can render the same prod-context warning the terminal
+// does. Returns empty text when no banner is active.
+func ActiveBanner() (text, style string) {
+	if activeBannerText == "" {
+		return "", ""
+	}
+	return activeBannerText, activeBannerKind
 }
 
 // persistentPostRunE runs after a subcommand completes (success or error). It

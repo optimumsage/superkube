@@ -1,0 +1,94 @@
+{{define "pods.html"}}
+<section class="page slide-up" x-data="PodsPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Pods</h1>
+      <p class="page-sub">
+        <span>Namespace <span class="mono" x-text="ns || 'all'"></span></span>
+        <span class="subtle">·</span>
+        <span x-text="rows.length + ' items'"></span>
+        <span class="subtle">·</span>
+        <span class="pill pill-success pill-live" x-show="connected">live</span>
+        <span class="pill pill-muted" x-show="!connected && !loading">disconnected</span>
+      </p>
+    </div>
+    <div class="page-actions">
+      <div style="position: relative; max-width: 280px; flex: 1; min-width: 200px;">
+        <input type="search" class="input input-search" placeholder="filter…" x-model="filter" />
+      </div>
+      <button class="btn btn-ghost btn-sm" @click="reload()" title="Refresh">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-refresh"/></svg>
+        Refresh
+      </button>
+    </div>
+  </header>
+
+  <div class="table-wrap scroll">
+    <table class="table">
+      <thead>
+        <tr>
+          <template x-for="h in headers" :key="h"><th x-text="h"></th></template>
+          <template x-if="loading && headers.length === 0">
+            <th>&nbsp;</th>
+          </template>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Skeleton rows while loading. -->
+        <template x-if="loading">
+          <template x-for="i in 6" :key="i">
+            <tr>
+              <template x-for="j in (headers.length || 5)" :key="j">
+                <td><span class="skel skel-line" :class="j % 3 === 0 ? 'w30' : (j % 2 === 0 ? 'w50' : 'w70')"></span></td>
+              </template>
+            </tr>
+          </template>
+        </template>
+
+        <!-- Empty state. -->
+        <template x-if="!loading && error">
+          <tr class="row-empty">
+            <td :colspan="Math.max(headers.length, 1)">
+              <div class="empty" style="border: none; background: transparent; padding: 24px 0;">
+                <div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#i-alert"/></svg></div>
+                <h3>Couldn't load pods</h3>
+                <p x-text="error"></p>
+              </div>
+            </td>
+          </tr>
+        </template>
+        <template x-if="!loading && !error && visible().length === 0">
+          <tr class="row-empty">
+            <td :colspan="Math.max(headers.length, 1)">
+              <div class="empty" style="border: none; background: transparent; padding: 24px 0;">
+                <div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#i-inbox"/></svg></div>
+                <h3>No pods to show</h3>
+                <p x-show="filter">No matches for <span class="mono" x-text="filter"></span>. Try clearing the filter.</p>
+                <p x-show="!filter">This namespace looks empty. Try switching context or namespace.</p>
+              </div>
+            </td>
+          </tr>
+        </template>
+
+        <!-- Real rows. -->
+        <template x-if="!loading && !error">
+          <template x-for="(row, i) in visible()" :key="row[0]+i">
+            <tr :class="row === selected && 'selected'" @click="open(row)">
+              <template x-for="(cell, ci) in row" :key="ci">
+                <td>
+                  <template x-if="pillFor(cell, ci)">
+                    <span :class="pillFor(cell, ci)" x-text="cell"></span>
+                  </template>
+                  <template x-if="!pillFor(cell, ci)">
+                    <span x-text="cell"></span>
+                  </template>
+                </td>
+              </template>
+            </tr>
+          </template>
+        </template>
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}

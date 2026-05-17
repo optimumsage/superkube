@@ -1,0 +1,140 @@
+{{define "pod_detail.html"}}
+<section class="page slide-up" x-data="PodDetail('{{.Namespace}}', '{{.Name}}')">
+  <header class="page-head">
+    <div class="page-head-text" style="min-width: 0; flex: 1;">
+      <p class="page-sub" style="margin: 0 0 6px;">
+        <span class="pill pill-info">Pod</span>
+        <template x-if="owner"><span class="muted">owned by <span class="mono" x-text="owner"></span></span></template>
+      </p>
+      <h1 class="page-title mono" style="font-size: 22px; word-break: break-all;" x-text="ns + ' / ' + name"></h1>
+    </div>
+    <div class="page-actions">
+      <button class="btn btn-ai btn-sm" @click="diagnose()" :disabled="aiBusy" title="AI root-cause analysis">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-sparkles"/></svg>
+        Diagnose
+      </button>
+      <button class="btn btn-ai btn-sm" @click="why()" :disabled="aiBusy" title="AI failure-mode classification">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-help"/></svg>
+        Why?
+      </button>
+      <button class="btn btn-ghost btn-sm" @click="openExec()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-terminal"/></svg>
+        Exec
+      </button>
+      <button class="btn btn-danger btn-sm" @click="askDelete()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-trash"/></svg>
+        Delete
+      </button>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <div class="tab" :class="tab==='logs'&&'active'" @click="tab='logs'">
+      <svg class="icon" aria-hidden="true"><use href="#i-file-text"/></svg>
+      Logs
+    </div>
+    <div class="tab" :class="tab==='describe'&&'active'" @click="tab='describe'; load('describe')">
+      <svg class="icon" aria-hidden="true"><use href="#i-eye"/></svg>
+      Describe
+    </div>
+    <div class="tab" :class="tab==='yaml'&&'active'" @click="tab='yaml'; load('yaml')">
+      <svg class="icon" aria-hidden="true"><use href="#i-clipboard"/></svg>
+      YAML
+    </div>
+    <div class="tab" :class="tab==='events'&&'active'" @click="tab='events'; load('events')">
+      <svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg>
+      Events
+    </div>
+    <div class="tab" :class="tab==='ai'&&'active'" @click="tab='ai'">
+      <svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>
+      AI
+    </div>
+  </div>
+
+  <!-- Logs tab -->
+  <div x-show="tab==='logs'" class="fade-in">
+    <div class="row">
+      <div style="position: relative; max-width: 280px; flex: 1;">
+        <input class="input input-search" placeholder="filter lines…" x-model="logFilter" />
+      </div>
+      <label class="checkrow"><input type="checkbox" x-model="follow" @change="reopen()" /> Follow</label>
+      <button class="btn btn-ghost btn-sm" @click="clearLogs()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+        Clear
+      </button>
+    </div>
+    <pre class="logs" x-ref="logs"></pre>
+  </div>
+
+  <!-- Describe / yaml / events tabs -->
+  <div x-show="tab==='describe' || tab==='yaml' || tab==='events'" class="fade-in">
+    <template x-if="loadingText">
+      <div class="code" style="display: flex; align-items: center; justify-content: center; padding: 40px;">
+        <span class="spinner spinner-lg"></span>
+      </div>
+    </template>
+    <template x-if="!loadingText">
+      <pre class="code" x-text="text || '(empty)'"></pre>
+    </template>
+  </div>
+
+  <!-- AI tab -->
+  <div x-show="tab==='ai'" class="fade-in">
+    <div class="ai-panel">
+      <div class="ai-panel-head">
+        <span class="ai-avatar"><svg aria-hidden="true"><use href="#i-sparkles"/></svg></span>
+        <div style="min-width: 0; flex: 1;">
+          <h3 class="ai-head-title" x-text="aiVerb ? (aiVerb + ' · ' + name) : 'Ask AI about this pod'"></h3>
+          <p class="ai-head-sub">
+            <template x-if="aiBusy">
+              <span class="ai-streaming">streaming…</span>
+            </template>
+            <template x-if="!aiBusy && aiText">
+              <span><svg class="icon icon-sm" aria-hidden="true" style="color: var(--success); width: 12px; height: 12px;"><use href="#i-check"/></svg> Response ready</span>
+            </template>
+            <template x-if="!aiBusy && !aiText && !aiError">
+              <span>Click <strong>Diagnose</strong> or <strong>Why?</strong> above to start.</span>
+            </template>
+          </p>
+        </div>
+      </div>
+
+      <template x-if="aiError">
+        <div class="ai-error">
+          <strong>AI error:</strong> <span x-text="aiError"></span>
+        </div>
+      </template>
+
+      <template x-if="!aiError && !aiText && !aiBusy">
+        <div class="ai-body is-empty">
+          <div class="empty-icon"><svg class="icon icon-xl" aria-hidden="true"><use href="#i-sparkles"/></svg></div>
+          <h3 style="margin: 0 0 4px; color: var(--fg-strong); font-size: 14px;">Awaiting prompt</h3>
+          <p style="font-size: 13px;">Press Diagnose for a root-cause analysis, or Why? for failure-mode classification. The response streams from your local AI CLI.</p>
+        </div>
+      </template>
+
+      <template x-if="aiText || (aiBusy && !aiError)">
+        <div class="ai-body" :class="aiBusy && 'ai-cursor'">
+          <span x-text="aiText"></span>
+        </div>
+      </template>
+
+      <div class="ai-actions">
+        <button class="btn btn-ai btn-sm" @click="diagnose()" :disabled="aiBusy">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#i-sparkles"/></svg>
+          Diagnose
+        </button>
+        <button class="btn btn-ghost btn-sm" @click="why()" :disabled="aiBusy">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#i-help"/></svg>
+          Why?
+        </button>
+        <span class="spacer"></span>
+        <button class="btn btn-outline btn-sm" @click="aiText = ''; aiError = ''; aiVerb = ''" x-show="aiText || aiError">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#i-x"/></svg>
+          Clear
+        </button>
+      </div>
+    </div>
+  </div>
+</section>
+{{end}}

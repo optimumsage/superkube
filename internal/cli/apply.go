@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -35,7 +36,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 
 	// Honor --dry-run=none to skip the preview entirely.
 	if Flags.DryRun != "none" {
-		preview, err := guardrail.PreviewApply(cmd.Context(), runner, kubectlArgs)
+		preview, err := guardrail.PreviewApply(cmd.Context(), runner, kubectlArgs, os.Stderr)
 		if err != nil {
 			return err
 		}
