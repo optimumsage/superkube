@@ -155,11 +155,25 @@ AI commands run your **local** `claude` or `gemini` CLI under your account. No d
 
 Redaction is **best-effort, not security**. If your prompt contains free-form pasted output, review before sending. Use `--no-context` to send the literal prompt with no cluster data attached.
 
-### Live table view (`sk get -w`)
+### Pretty `get`, `describe`, `logs`
 
-On a TTY with a default/wide table format, `sk get <res> -w` opens a client-go watch and redraws the table in-place on every change. Honors `-n`, `-A`, and `-l`/`--selector`. Works with built-in kinds and CRDs (resolved via the discovery API).
+On a TTY, the three most-used read commands are styled inline by superkube — no flags to flip, no formatters to install.
 
-Anything that needs scripting compatibility — `-o json|yaml|name|jsonpath`, piped output, redirected stdout — still passes through to `kubectl` verbatim.
+**`sk get`** — known columns (`STATUS`, `READY`, `RESTARTS`, `AGE`, `TYPE`) are repainted in place by status: green for `Running` / `True` / `n/n`, yellow for `Pending` / `Init:*` / partial-ready, red for `CrashLoopBackOff` / `ImagePullBackOff` / `OOMKilled` / `0/n`, muted for `0` restarts and timestamps. Pods, nodes, and events also get a one-line summary footer:
+
+```
+3 pods · 2 Running · 1 CrashLoopBackOff
+```
+
+Column alignment is preserved byte-for-byte — ANSI escapes are zero-width, and trailing padding is left untouched, so the styled output diffs cleanly against `kubectl get`.
+
+**`sk describe`** — section headings (`Containers:`, `Conditions:`, `Events:`, `Volumes:`, …) are bolded; `Status`/`Phase`/`Ready` values run through the same colorizer as `sk get`; rows in the embedded `Events:` and `Conditions:` tables are repainted (`Warning` events yellow, `False`/`Unknown` conditions red/yellow). All flags pass through to `kubectl describe` unchanged.
+
+**`sk logs`** — each line is scanned for level tags (`ERROR` / `WARN` / `INFO` / `DEBUG`), `panic:` / `fatal:` prefixes (whole-line red), HTTP method+status patterns (color by 2xx/4xx/5xx), ISO-8601 timestamps at line start (muted), and stack-frame indents (`	at …`, `  File "…"`). Works for `-f` follow mode and composes with `--multi=<target>` (per-pod colored prefix sits next to per-line severity colors).
+
+**Live watch (`sk get -w`)** — opens a client-go watch and redraws in place on every change, with the same per-cell coloring as the static `sk get`. Honors `-n`, `-A`, and `-l`/`--selector`. Works with built-in kinds and CRDs (resolved via the discovery API).
+
+All four paths gate strictly on TTY. Anything that needs scripting compatibility — `-o json|yaml|name|jsonpath`, piped output, redirected stdout, `--plain`, `NO_COLOR` — still passes through to `kubectl` verbatim, byte-for-byte.
 
 ### Full-screen TUI (`sk tui`)
 
@@ -377,12 +391,12 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 
 | Command | Behavior | Guardrails |
 |---|---|---|
-| `sk get <res>` | shells out; colored header on TTY; live table for `-w` on TTY; verbatim passthrough for `-o json/yaml/name/jsonpath`, pipes, redirects | none |
-| `sk describe <res>` | verbatim passthrough | none |
+| `sk get <res>` | shells out; styled header + per-cell STATUS/READY/RESTARTS/AGE/TYPE coloring + per-kind summary footer on TTY; live table for `-w` on TTY; verbatim passthrough for `-o json/yaml/name/jsonpath`, pipes, redirects | none |
+| `sk describe <res>` | shells out; bolded section headings + status-aware values + colored Events/Conditions tables on TTY; verbatim passthrough off-TTY | none |
 | `sk apply -f …` | server-side dry-run → colored diff → confirm → apply | dry-run + confirm |
 | `sk delete <res>` | typed-name confirm; `--all` requires `--yes` + typed `DELETE` phrase | typed |
 | `sk patch` / `replace` / `create` | passthrough | passthrough |
-| `sk logs <pod>` | passthrough; `--ai` summarizes the tail; `--multi=<target>` streams many pods with colored prefix | none |
+| `sk logs <pod>` | shells out; on TTY, line-by-line severity / panic / HTTP-status / timestamp coloring (works in `-f` follow); `--ai` summarizes the tail; `--multi=<target>` streams many pods with colored prefix + severity highlighting | none |
 | `sk exec` / `sk port-forward` | passthrough; TTY + signals propagated; clean teardown on Ctrl-C | passthrough |
 | `sk rollout undo` | typed confirm | confirm |
 | `sk scale --replicas=0` | typed confirm when scaling to 0 | confirm |

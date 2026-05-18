@@ -62,9 +62,13 @@ func formatRow(cols []string, widths []int) string {
 	return b.String()
 }
 
-// visualLen returns the printable rune length of s, ignoring ANSI escapes.
-// kubectl never emits ANSI in `-o wide`/`-o name`, so for now we treat each
-// rune as width 1 — wide CJK characters in resource names are vanishingly rare.
+// VisualLen returns the printable rune length of s, ignoring ANSI escape
+// sequences. Each rune counts as 1; this is good enough for kubectl table
+// content (wide CJK characters in resource names are vanishingly rare).
+// Exported for callers in internal/cli that need to size columns over
+// possibly-styled strings.
+func VisualLen(s string) int { return visualLen(s) }
+
 func visualLen(s string) int {
 	// Strip basic ANSI CSI sequences just in case future code colorizes cells.
 	n := 0

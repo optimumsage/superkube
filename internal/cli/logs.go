@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -44,10 +45,22 @@ func runLogs(cmd *cobra.Command, args []string) error {
 
 	useAI := hasFlag(args, "--ai")
 	if !useAI {
-		// Plain passthrough — preserves -f, exit codes, signal handling.
 		runner, err := kubectl.Default()
 		if err != nil {
 			return err
+		}
+		// On TTY, stream through a line-by-line colorizer so ERROR/WARN/INFO
+		// tokens, panics, stack frames, HTTP status codes, and timestamps are
+		// highlighted as kubectl produces them (incl. `-f` follow mode). On
+		// pipes/redirects we fall through to the default RunOpts so output is
+		// byte-identical to `kubectl logs` for jq/awk/grep callers.
+		if ui.Styled() {
+			lc := newLineColorizer(os.Stdout)
+			defer func() { _ = lc.Flush() }()
+			return runner.Run(cmd.Context(), append([]string{"logs"}, args...), kubectl.RunOpts{
+				Stdout: lc,
+				Stderr: os.Stderr,
+			})
 		}
 		return runner.Run(cmd.Context(), append([]string{"logs"}, args...), kubectl.RunOpts{})
 	}
@@ -151,7 +164,17 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 
 	loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: effectiveContext(args)}
 	prefixer := podPrefixer()
-	return loader.TailMulti(cmd.Context(), opts, os.Stdout, prefixer)
+	// On TTY, also colorize log severity tokens inside each line. podPrefixer
+	// already paints the `[pod] ` prefix in its per-pod color; the colorizer
+	// only touches recognized severity tokens / HTTP codes / timestamps later
+	// in the line, so the two layers compose cleanly.
+	var out io.Writer = os.Stdout
+	if ui.Styled() {
+		lc := newLineColorizer(os.Stdout)
+		defer lc.Flush()
+		out = lc
+	}
+	return loader.TailMulti(cmd.Context(), opts, out, prefixer)
 }
 
 // podPrefixer returns a LinePrefixer that colorizes the [pod-name] tag with a
