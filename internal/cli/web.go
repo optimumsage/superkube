@@ -71,5 +71,6 @@ pass --token explicitly.`,
 	c.Flags().StringVar(&bind, "bind", "127.0.0.1", "bind address; use 0.0.0.0 for non-loopback only on trusted networks")
 	c.Flags().StringVar(&token, "token", "", "auth token; auto-generated when --bind is non-loopback")
 	c.Flags().BoolVar(&noOpen, "no-open", false, "do not auto-open a browser")
+	c.AddCommand(newWebInstallCmd(), newWebUninstallCmd(), newWebStatusCmd())
 	return c
 }

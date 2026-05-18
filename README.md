@@ -212,6 +212,22 @@ sk web
 
 The default opens `http://127.0.0.1:<auto-port>` in your browser. Every CLI verb has a screen — pods (live), workloads, services, nodes, **ConfigMaps / Secrets / Ingresses** (live + inline edit), logs (single, multi-pod, and AI-summarized), apply with diff preview, delete/scale/rollout/drain/cordon with the same typed-name and typed-phrase confirmations, port-forward manager, audit log viewer (filterable + follow), AI chat (`sk ai explain`), diagnose / why, config editor, and an embedded xterm.js terminal for pod exec.
 
+#### Running as a background service
+
+`sk web` is foreground by default — it dies when the terminal closes. To keep it running across reboots, install it as a user-level OS service:
+
+```sh
+sk web install                          # launchd LaunchAgent (macOS) or systemd --user unit (Linux)
+sk web install --port 7070              # pin a port instead of auto-picking
+sk web install --bind 0.0.0.0 --force   # replace an existing install
+sk web status                           # installed / loaded / running, URL, log paths
+sk web uninstall                        # stop and remove the unit file
+```
+
+The service runs `superkube web --bind … --port … --token … --no-open` with `KeepAlive` (launchd) / `Restart=on-failure` (systemd) so it relaunches if it crashes. Logs go to `$XDG_STATE_HOME/superkube/web.{log,err}`. No sudo is needed — everything lives under your user (`~/Library/LaunchAgents` or `~/.config/systemd/user`).
+
+On Linux, run `loginctl enable-linger $USER` once if you want the service to survive a full logout. macOS LaunchAgents survive logout by default.
+
 #### Workload actions
 
 Pod rows, workload rows, and node rows all surface a per-row `⋯` action menu. Every destructive action runs through the same guardrail policy and typed-name / typed-phrase confirmation flow the CLI uses — `--yes` is not bypassed by the UI, and `forbid:` rules block unconditionally.
@@ -379,6 +395,9 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 | `sk ns [name\|-]` | list / switch / previous namespace | n/a |
 | `sk tui` | full-screen pod browser with describe/logs/diagnose actions | n/a |
 | `sk web [--port N] [--bind addr] [--token T] [--no-open]` | browser-based control plane with parity to every sk verb; localhost-only by default | inherits all |
+| `sk web install [--port N] [--bind addr] [--token T] [--force]` | install `sk web` as a user-level background service (launchd on macOS, systemd `--user` on Linux); auto-starts on login | n/a |
+| `sk web uninstall` | stop the service and remove the unit file | confirm |
+| `sk web status` | report installed / loaded / running state, URL, token, log paths | n/a |
 | `sk ai explain "<q>"` | free-form AI question with current ctx/ns as light context | n/a |
 | `sk diagnose pod/<name>` | describe + events + logs + owner chain + sibling pods → AI explains | n/a |
 | `sk why pod/<name>` | tighter AI prompt for Pending / CrashLoop / ImagePull / OOM / probe failures | n/a |

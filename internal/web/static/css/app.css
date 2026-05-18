@@ -1122,7 +1122,8 @@ body.theme-light .sidebar {
   border-radius: var(--r-md);
   box-shadow: var(--shadow-2);
   padding: 4px;
-  z-index: 30;
+  /* Above topbar/sticky-header (30) and toasts (50); below modal (80). */
+  z-index: 60;
   display: flex;
   flex-direction: column;
 }
