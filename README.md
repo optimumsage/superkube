@@ -71,6 +71,8 @@ sk ctx clean                          # tick contexts to remove (manual)
 sk ctx clean --auto                   # probe each context, drop unreachable ones
 sk ns kube-system                     # switch namespace
 sk get pods                           # styled header on a TTY, plain in a pipe
+sk pods                               # `get` is optional for built-in resources
+sk pods -n kube-system                # also: sk svc, sk deploy, sk nodes, …
 sk get pods -w                        # live-refreshing table
 sk apply -f deployment.yaml           # diff preview + confirm before applying
 sk delete pod foo                     # typed-name confirmation
@@ -172,6 +174,8 @@ Column alignment is preserved byte-for-byte — ANSI escapes are zero-width, and
 **`sk logs`** — each line is scanned for level tags (`ERROR` / `WARN` / `INFO` / `DEBUG`), `panic:` / `fatal:` prefixes (whole-line red), HTTP method+status patterns (color by 2xx/4xx/5xx), ISO-8601 timestamps at line start (muted), and stack-frame indents (`	at …`, `  File "…"`). Works for `-f` follow mode and composes with `--multi=<target>` (per-pod colored prefix sits next to per-line severity colors).
 
 **Live watch (`sk get -w`)** — opens a client-go watch and redraws in place on every change, with the same per-cell coloring as the static `sk get`. Honors `-n`, `-A`, and `-l`/`--selector`. Works with built-in kinds and CRDs (resolved via the discovery API).
+
+**`get` is optional** — for built-in kubectl resources (`pods`, `svc`, `deploy`, `nodes`, `ns`, `cm`, `secrets`, `ingress`, `jobs`, `cronjobs`, …including short names and `pod/foo` form), you can drop the `get` verb entirely: `sk pods`, `sk svc -n kube-system`, `sk deploy/web`. Unknown verbs still pass through to `kubectl` verbatim, so krew plugins (`sk neat`, `sk tree`) keep working.
 
 All four paths gate strictly on TTY. Anything that needs scripting compatibility — `-o json|yaml|name|jsonpath`, piped output, redirected stdout, `--plain`, `NO_COLOR` — still passes through to `kubectl` verbatim, byte-for-byte.
 

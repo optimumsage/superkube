@@ -57,6 +57,45 @@ func TestPrintGetFrameEmpty(t *testing.T) {
 	}
 }
 
+func TestPrintGetFrameCompletedPodReadyNotRed(t *testing.T) {
+	// Mirrors TestRenderGetTableCompletedPodReadyNotRed but for the live
+	// watch path (printGetFrame). A finished job pod reports READY=0/1 with
+	// STATUS=Completed; that READY cell shouldn't render in alarm-red.
+	restore := ui.SetStdoutTTYForTest(true)
+	defer restore()
+	prev := ui.Plain
+	ui.Plain = false
+	defer func() { ui.Plain = prev }()
+
+	var buf bytes.Buffer
+	printGetFrame(&buf, kube.TableFrame{
+		Headers: []string{"NAME", "READY", "STATUS", "RESTARTS", "AGE"},
+		Rows: [][]string{
+			{"job-1", "0/1", "Completed", "0", "5m"},
+			{"job-2", "0/1", "Pending", "0", "5m"},
+		},
+	})
+	out := buf.String()
+
+	dangerReady := ui.Render(ui.Danger, "0/1")
+	subtleReady := ui.Render(ui.Subtle, "0/1")
+
+	completedLine := findLineContaining(out, "Completed")
+	pendingLine := findLineContaining(out, "Pending")
+	if completedLine == "" || pendingLine == "" {
+		t.Fatalf("missing one of the rows in output:\n%s", out)
+	}
+	if strings.Contains(completedLine, dangerReady) {
+		t.Errorf("Completed pod READY=0/1 must NOT use Danger style; line:\n%q", completedLine)
+	}
+	if !strings.Contains(completedLine, subtleReady) {
+		t.Errorf("Completed pod READY=0/1 should use Subtle style; got line:\n%q", completedLine)
+	}
+	if !strings.Contains(pendingLine, dangerReady) {
+		t.Errorf("Pending pod READY=0/1 should still be Danger-styled; got line:\n%q", pendingLine)
+	}
+}
+
 func TestPrintGetFrameCountsFooterInEmittedLines(t *testing.T) {
 	// runGetWatch's redraw uses the emitted-line count to do an ANSI
 	// cursor-up of exactly that many rows. If the footer is printed but

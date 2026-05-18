@@ -97,16 +97,36 @@ func printGetFrame(w io.Writer, f kube.TableFrame) int {
 	for i, name := range headerNames {
 		painters[i] = colorizerFor(name, kind)
 	}
+	statusIdx, readyIdx := -1, -1
+	for i, name := range headerNames {
+		switch name {
+		case "STATUS":
+			statusIdx = i
+		case "READY":
+			readyIdx = i
+		}
+	}
 
 	formatRow := func(cells []string, colorize bool) string {
+		// Per-row painter override: for pods that finished (Completed/Succeeded),
+		// READY=0/N is expected and shouldn't render as a red failure.
+		rowP := painters
+		if colorize && kind == "pod" && statusIdx >= 0 && readyIdx >= 0 && statusIdx < len(cells) {
+			st := strings.TrimSpace(cells[statusIdx])
+			if st == "Completed" || st == "Succeeded" {
+				rowP = make([]cellColorizer, len(painters))
+				copy(rowP, painters)
+				rowP[readyIdx] = ui.ColorizeAge
+			}
+		}
 		var sb strings.Builder
 		for i, c := range cells {
 			if i >= len(widths) {
 				break
 			}
 			out := c
-			if colorize && i < len(painters) && painters[i] != nil && c != "" {
-				out = painters[i](c)
+			if colorize && i < len(rowP) && rowP[i] != nil && c != "" {
+				out = rowP[i](c)
 			}
 			sb.WriteString(out)
 			// Pad against the unstyled (visual) width — ANSI from our own
