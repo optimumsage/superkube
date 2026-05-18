@@ -34,10 +34,14 @@
         @keydown.meta.enter="ask()"
         @keydown.ctrl.enter="ask()"
       ></textarea>
-      <div class="row" style="margin-top: 10px; gap: 12px;">
+      <div class="row" style="margin-top: 10px; gap: 12px; flex-wrap: wrap;">
         <label class="checkrow">
           <input type="checkbox" x-model="withContext" />
           Attach cluster context (ctx + namespace)
+        </label>
+        <label class="checkrow" :title="provider === 'claude' ? 'Lets Claude run kubectl/sk read-only verbs (get, describe, logs, events, top, …). Writes are always blocked.' : 'Best-effort for ' + (provider || 'this provider') + ' — only claude can strictly enforce the allowlist.'">
+          <input type="checkbox" x-model="allowReadOnly" />
+          Allow <span x-text="provider || 'AI'"></span> to run read-only commands
         </label>
         <span class="spacer"></span>
         <span class="subtle" style="font-size: 11.5px;">⌘↵ to send</span>

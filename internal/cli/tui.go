@@ -181,7 +181,7 @@ func makeAIProducer(runner *kubectl.Runner, template string) tui.ProducerFn {
 			return err
 		}
 		fmt.Fprintf(w, "\nasking %s…\n\n", provider.Name())
-		if err := provider.Run(ctx, prompt, w); err != nil {
+		if err := provider.Run(ctx, prompt, w, ai.RunOpts{}); err != nil {
 			return fmt.Errorf("%s: %w", provider.Name(), err)
 		}
 		return nil

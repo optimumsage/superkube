@@ -17,6 +17,12 @@ type PromptInputs struct {
 	Logs        string // last N log lines per container, redacted + truncated
 	OwnerChain  string // pod -> rs -> deploy, or empty
 	SiblingPods string // summary of other pods in the same workload
+
+	// ToolsAllowed signals to the template that the AI provider will have
+	// read-only kubectl/sk Bash access for this run. Templates use this to
+	// adjust the framing (don't apologize for missing tools when tools are
+	// in fact available).
+	ToolsAllowed bool
 }
 
 // Render fills the named template with inputs. The input is redacted before
@@ -59,6 +65,22 @@ Current namespace: {{ if .Namespace }}{{ .Namespace }}{{ else }}default{{ end }}
 `
 
 const tmplExplain = preamble + `
+{{ if .ToolsAllowed -}}
+You have permission to run read-only kubectl/sk commands via the Bash tool
+(get, describe, logs, events, top, explain, api-resources, api-versions,
+version, cluster-info, auth can-i, config view/get-contexts/current-context).
+You MUST NOT run any command that mutates state (apply, create, delete, edit,
+patch, replace, scale, rollout, cordon, drain, exec, port-forward, debug,
+attach). Prefer the smallest set of commands needed to answer. Always pass
+-n/--namespace explicitly when querying namespaced resources.
+{{- else -}}
+You have NO tools available in this session — you cannot run kubectl, sk, or
+any shell command. Do not apologize or say you lack permission. Answer the
+user from general Kubernetes knowledge, or if the question requires live
+cluster state you cannot see, tell the user the exact ` + "`sk`" + ` or
+` + "`kubectl`" + ` command they should run themselves (one line, copy-pastable).
+{{- end }}
+
 User question:
 {{ .Question }}
 `

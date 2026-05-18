@@ -749,7 +749,7 @@
 
   window.AIPage = function () {
     return {
-      question: '', withContext: true, busy: false, provider: '', answer: '', error: '',
+      question: '', withContext: true, allowReadOnly: true, busy: false, provider: '', answer: '', error: '',
       examples: [
         'Why is my pod in CrashLoopBackOff?',
         'Which Deployments are unhealthy right now?',
@@ -765,7 +765,9 @@
         this.busy = true; this.answer = ''; this.error = '';
         try {
           await streamSSEPost('/api/v1/ai/explain', {
-            question: this.question, with_context: this.withContext,
+            question: this.question,
+            with_context: this.withContext,
+            allow_read_only: this.allowReadOnly,
           }, {
             onChunk: (text) => { this.answer += text; },
             onError: (msg) => { this.error = msg; },

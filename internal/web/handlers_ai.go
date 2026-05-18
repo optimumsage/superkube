@@ -11,11 +11,14 @@ import (
 )
 
 // apiAIExplain streams a free-form AI answer over SSE. Mirrors `sk ai
-// explain <question>` — context attachment is opt-in via with_context.
+// explain <question>` — context attachment is opt-in via with_context, and
+// the caller may also opt into read-only kubectl/sk tool access via
+// allow_read_only (claude only; gemini falls back to prompt-only constraint).
 func (s *Server) apiAIExplain(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Question    string `json:"question"`
-		WithContext bool   `json:"with_context"`
+		Question      string `json:"question"`
+		WithContext   bool   `json:"with_context"`
+		AllowReadOnly bool   `json:"allow_read_only"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Question == "" {
 		http.Error(w, "question required", http.StatusBadRequest)
@@ -28,9 +31,10 @@ func (s *Server) apiAIExplain(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := s.readSession(r)
 	in := ai.PromptInputs{
-		Question:  body.Question,
-		Context:   sess.Context,
-		Namespace: sess.Namespace,
+		Question:     body.Question,
+		Context:      sess.Context,
+		Namespace:    sess.Namespace,
+		ToolsAllowed: body.AllowReadOnly,
 	}
 	if !body.WithContext || s.deps.NoContext {
 		in.Context = ""
@@ -41,7 +45,7 @@ func (s *Server) apiAIExplain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.streamAI(w, r, provider, prompt, "explain")
+	s.streamAI(w, r, provider, prompt, "explain", ai.RunOpts{AllowReadOnlyKubectl: body.AllowReadOnly})
 }
 
 // apiAIDiagnose gathers describe + events + logs + owner chain + siblings
@@ -95,7 +99,7 @@ func (s *Server) apiAILogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.streamAI(w, r, provider, prompt, "logs")
+	s.streamAI(w, r, provider, prompt, "logs", ai.RunOpts{})
 }
 
 // runDiagnose is shared by /ai/diagnose and /ai/why. The only difference is
@@ -154,13 +158,14 @@ func (s *Server) runDiagnose(w http.ResponseWriter, r *http.Request, tmpl string
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.streamAI(w, r, provider, prompt, tmpl)
+	s.streamAI(w, r, provider, prompt, tmpl, ai.RunOpts{})
 }
 
 // streamAI runs the provider with prompt → SSE writer. Each chunk the provider
 // emits becomes one "chunk" event. We finish with an "end" event so the
-// client can stop the spinner.
-func (s *Server) streamAI(w http.ResponseWriter, r *http.Request, provider ai.Provider, prompt, verb string) {
+// client can stop the spinner. opts is forwarded to the provider verbatim so
+// the caller controls e.g. read-only tool access.
+func (s *Server) streamAI(w http.ResponseWriter, r *http.Request, provider ai.Provider, prompt, verb string, opts ai.RunOpts) {
 	sse, err := newSSE(w)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -171,7 +176,7 @@ func (s *Server) streamAI(w http.ResponseWriter, r *http.Request, provider ai.Pr
 
 	start := time.Now()
 	wr := &chunkSSE{sse: sse}
-	if err := provider.Run(r.Context(), prompt, wr); err != nil && r.Context().Err() == nil {
+	if err := provider.Run(r.Context(), prompt, wr, opts); err != nil && r.Context().Err() == nil {
 		_ = sse.Send("error", map[string]string{"message": err.Error()})
 	}
 	_ = sse.Send("end", map[string]any{"ms": time.Since(start).Milliseconds()})
