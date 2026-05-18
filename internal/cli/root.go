@@ -53,7 +53,19 @@ func Execute(args []string) int {
 	// handing argv to cobra to avoid "unknown command" errors. Passthrough
 	// receives the full argv unchanged so kubectl-global flags (e.g. -v=8,
 	// --server) survive.
-	verb, hasVerb := firstVerb(args)
+	verb, verbIdx, hasVerb := firstVerbAt(args)
+
+	// Resource shortcut: `sk pods` → `sk get pods`. Only when the first verb
+	// isn't already a known sk subcommand AND names a built-in kubectl resource.
+	// Skipped when the verb came after a `--` separator (user explicitly asked
+	// for raw kubectl semantics). Krew plugin names and unknown tokens stay on
+	// the passthrough path below.
+	if hasVerb && !isKnownCommand(root, verb) && looksLikeResource(verb) &&
+		!(verbIdx > 0 && args[verbIdx-1] == "--") {
+		args = insertVerbAt(args, verbIdx, "get")
+		verb = "get"
+	}
+
 	if hasVerb && !isKnownCommand(root, verb) {
 		code := runPassthrough(rootContext(), args)
 		recordAudit(verb, args, code, time.Since(start))
@@ -356,20 +368,28 @@ func exitCodeFromErr(err error) int {
 // fine because passthrough hands the full argv to kubectl, which will produce
 // the same error the user would have seen from kubectl directly.
 func firstVerb(args []string) (verb string, ok bool) {
+	v, _, found := firstVerbAt(args)
+	return v, found
+}
+
+// firstVerbAt is firstVerb plus the verb's index in args (so callers that need
+// to splice tokens — e.g. the `sk pods` → `sk get pods` rewrite — know where
+// to insert). idx is meaningless when ok is false.
+func firstVerbAt(args []string) (verb string, idx int, ok bool) {
 	i := 0
 	for i < len(args) {
 		a := args[i]
 		if a == "--" {
 			// Everything after `--` is positional.
 			if i+1 < len(args) {
-				return args[i+1], true
+				return args[i+1], i + 1, true
 			}
-			return "", false
+			return "", 0, false
 		}
 		if strings.HasPrefix(a, "-") {
 			name := strings.TrimLeft(a, "-")
 			if eq := strings.IndexByte(name, '='); eq >= 0 {
-				name = name[:eq]
+				_ = name[:eq]
 				i++
 				continue
 			}
@@ -380,9 +400,9 @@ func firstVerb(args []string) (verb string, ok bool) {
 			i++
 			continue
 		}
-		return a, true
+		return a, i, true
 	}
-	return "", false
+	return "", 0, false
 }
 
 // rootFlagTakesValue reports whether a superkube root flag of the given name

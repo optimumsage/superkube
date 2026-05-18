@@ -127,6 +127,56 @@ func inferKind(headerNames []string) string {
 	return ""
 }
 
+// rowPainters returns painters adjusted for the contents of a specific row.
+// Currently it suppresses the alarmist READY=0/N red on pod rows whose STATUS
+// is Completed/Succeeded — a finished job pod legitimately reports 0/1 and
+// shouldn't read as a failure. Returns the original painters slice unchanged
+// when no override is needed (avoids per-row allocations on the common path).
+func rowPainters(line string, spans []columnSpan, painters []cellColorizer, names []string, kind string) []cellColorizer {
+	if kind != "pod" {
+		return painters
+	}
+	statusIdx, readyIdx := -1, -1
+	for i, n := range names {
+		switch n {
+		case "STATUS":
+			statusIdx = i
+		case "READY":
+			readyIdx = i
+		}
+	}
+	if statusIdx < 0 || readyIdx < 0 {
+		return painters
+	}
+	status := cellTextAt(line, spans, statusIdx)
+	if status != "Completed" && status != "Succeeded" {
+		return painters
+	}
+	out := make([]cellColorizer, len(painters))
+	copy(out, painters)
+	out[readyIdx] = ui.ColorizeAge // subtle — same muted style we use for AGE
+	return out
+}
+
+// cellTextAt returns the trimmed text of column `col` from `line`, sliced by
+// `spans`. Returns "" if the column is out of range or the line is too short
+// for the span's start. Mirrors the slicing paintRow uses, so we read the same
+// bytes that get painted.
+func cellTextAt(line string, spans []columnSpan, col int) string {
+	if col < 0 || col >= len(spans) {
+		return ""
+	}
+	s := spans[col]
+	end := s.end
+	if end < 0 || end > len(line) {
+		end = len(line)
+	}
+	if s.start > len(line) {
+		return ""
+	}
+	return strings.TrimSpace(line[s.start:end])
+}
+
 // paintRow returns a new row line with its cells repainted by `painters`,
 // preserving the exact trailing padding for each column (so total visual
 // width stays unchanged — ANSI escapes are zero-width).
@@ -240,7 +290,8 @@ func renderGetTable(w io.Writer, raw string) int {
 			continue
 		}
 		if len(spans) > 0 {
-			fmt.Fprintln(w, paintRow(line, spans, painters))
+			rp := rowPainters(line, spans, painters, names, kind)
+			fmt.Fprintln(w, paintRow(line, spans, rp))
 			currentRows = append(currentRows, line)
 		} else {
 			// No header detected for this chunk — emit verbatim. Keeps us safe

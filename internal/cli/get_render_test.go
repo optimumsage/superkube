@@ -137,6 +137,59 @@ func TestRenderGetTablePodFooter(t *testing.T) {
 	}
 }
 
+func TestRenderGetTableCompletedPodReadyNotRed(t *testing.T) {
+	// Job pods that have finished legitimately report READY=0/1 with
+	// STATUS=Completed. Painting that cell red would mis-signal a failure.
+	// Pin the contract: the same READY="0/1" cell is bold-red when the pod is
+	// Pending (truly not-ready) but muted/subtle when the pod is Completed.
+	restore := ui.SetStdoutTTYForTest(true)
+	defer restore()
+	prev := ui.Plain
+	ui.Plain = false
+	defer func() { ui.Plain = prev }()
+
+	raw := "NAME     READY   STATUS      RESTARTS   AGE\n" +
+		"job-1    0/1     Completed   0          5m\n" +
+		"job-2    0/1     Pending     0          5m\n"
+	var buf bytes.Buffer
+	renderGetTable(&buf, raw)
+	out := buf.String()
+
+	// Find each data row's painted READY cell. The lines come back styled —
+	// pull the line, find the "0/1" occurrence, and check whether it's wrapped
+	// by the Danger style (which the Pending row uses) vs. Subtle (Completed).
+	dangerReady := ui.Render(ui.Danger, "0/1")
+	subtleReady := ui.Render(ui.Subtle, "0/1")
+
+	completedLine := findLineContaining(out, "Completed")
+	pendingLine := findLineContaining(out, "Pending")
+	if completedLine == "" || pendingLine == "" {
+		t.Fatalf("missing one of the rows in output:\n%s", out)
+	}
+
+	if strings.Contains(completedLine, dangerReady) {
+		t.Errorf("Completed pod READY=0/1 must NOT use Danger style; line:\n%q", completedLine)
+	}
+	if !strings.Contains(completedLine, subtleReady) {
+		t.Errorf("Completed pod READY=0/1 should use Subtle style; got line:\n%q", completedLine)
+	}
+	if !strings.Contains(pendingLine, dangerReady) {
+		t.Errorf("Pending pod READY=0/1 should still be Danger-styled; got line:\n%q", pendingLine)
+	}
+}
+
+// findLineContaining returns the first line of s that contains needle (after
+// ANSI stripping). Used by the completed-pod test to isolate one row from a
+// multi-row rendered table.
+func findLineContaining(s, needle string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(stripANSI(line), needle) {
+			return line
+		}
+	}
+	return ""
+}
+
 func TestRenderGetTableEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	renderGetTable(&buf, "")
