@@ -7,6 +7,7 @@ package ui
 import (
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/mattn/go-isatty"
 )
@@ -34,10 +35,23 @@ func Init(plainFlag bool) {
 }
 
 // IsStdoutTTY reports whether stdout is a terminal. Cached; we don't poll fds
-// repeatedly.
+// repeatedly. Tests can short-circuit this via SetStdoutTTYForTest.
 func IsStdoutTTY() bool {
 	stdoutOnce.Do(func() { stdoutTTY = isatty.IsTerminal(os.Stdout.Fd()) })
+	if p := stdoutTTYOverride.Load(); p != nil {
+		return *p
+	}
 	return stdoutTTY
+}
+
+// SetStdoutTTYForTest forces the TTY-detection cache to a known value and
+// returns a restore func. Tests use this to exercise the styled path even
+// when running under `go test` where stdout isn't a real terminal. Backed by
+// atomic.Pointer so parallel tests don't race the override.
+func SetStdoutTTYForTest(v bool) func() {
+	prev := stdoutTTYOverride.Load()
+	stdoutTTYOverride.Store(&v)
+	return func() { stdoutTTYOverride.Store(prev) }
 }
 
 // IsStdinTTY reports whether stdin is a terminal. Used by the guardrail layer
@@ -61,8 +75,9 @@ func Styled() bool {
 }
 
 var (
-	stdoutOnce sync.Once
-	stdoutTTY  bool
-	stdinOnce  sync.Once
-	stdinTTY   bool
+	stdoutOnce        sync.Once
+	stdoutTTY         bool
+	stdoutTTYOverride atomic.Pointer[bool] // test-only override; nil = use real detection
+	stdinOnce         sync.Once
+	stdinTTY          bool
 )

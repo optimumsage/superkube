@@ -163,6 +163,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newCtxCmd())
 	root.AddCommand(newNSCmd())
 	root.AddCommand(newGetCmd())
+	root.AddCommand(newDescribeCmd())
 	root.AddCommand(newDeleteCmd())
 	root.AddCommand(newApplyCmd())
 	root.AddCommand(newScaleCmd())

@@ -2,8 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"fmt"
-	"io"
 	"os"
 	"strings"
 
@@ -16,7 +14,7 @@ import (
 func newGetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:                "get RESOURCE [NAME]",
-		Short:              "kubectl get with a styled header on TTY (verbatim passthrough otherwise)",
+		Short:              "kubectl get with styled header + per-cell status coloring on TTY",
 		Long:               getLongHelp,
 		DisableFlagParsing: true,
 		RunE:               runGet,
@@ -56,7 +54,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 	})
 	// Even on error (e.g. NotFound) kubectl may still have produced a header.
 	// Render whatever we got and propagate the exit code.
-	renderGetOutput(cmd.OutOrStdout(), stdout.String())
+	renderGetTable(cmd.OutOrStdout(), stdout.String())
 	return err
 }
 
@@ -94,52 +92,18 @@ func isTableFormat(v string) bool {
 	}
 }
 
-// renderGetOutput colorizes only the header line, which is the first
-// non-empty line of kubectl's table output. Everything else passes through
-// unchanged so column alignment stays perfect — kubectl already did the
-// formatting work; we just paint the band.
-func renderGetOutput(w io.Writer, raw string) {
-	if raw == "" {
-		return
-	}
-	first := true
-	for line := range splitLines(raw) {
-		if first && len(strings.TrimSpace(line)) > 0 {
-			fmt.Fprintln(w, ui.Render(ui.HeaderBg, line))
-			first = false
-			continue
-		}
-		fmt.Fprintln(w, line)
-	}
-}
-
-// splitLines yields each line of s without its trailing newline. Allocates
-// a slice rather than using bufio so we keep blank lines intact.
-func splitLines(s string) <-chan string {
-	ch := make(chan string)
-	go func() {
-		defer close(ch)
-		start := 0
-		for i := 0; i < len(s); i++ {
-			if s[i] == '\n' {
-				ch <- s[start:i]
-				start = i + 1
-			}
-		}
-		if start < len(s) {
-			ch <- s[start:]
-		}
-	}()
-	return ch
-}
-
-const getLongHelp = `kubectl get with a colored header band on a TTY.
+const getLongHelp = `kubectl get with a colored header band and per-cell status coloring on a TTY.
 
 Behavior:
   * stdout is a TTY and output is table-form        → header rendered with our
-                                                       lipgloss style; data rows
-                                                       passed through unchanged
-                                                       (column alignment preserved).
+                                                       lipgloss style; STATUS,
+                                                       READY, RESTARTS, AGE,
+                                                       TYPE cells colorized in
+                                                       place; column alignment
+                                                       byte-preserved (ANSI is
+                                                       zero-width). A muted
+                                                       summary line is appended
+                                                       for pods/nodes/events.
   * stdout is piped, or -o json|yaml|name|jsonpath
     or --watch is set                               → verbatim passthrough.
 
