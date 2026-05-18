@@ -1,0 +1,68 @@
+{{define "portforward.html"}}
+<section class="page slide-up" x-data="PFPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Port-forwards</h1>
+      <p class="page-sub">Same lifecycle as <span class="mono">sk pf</span> — forwards survive page reloads.</p>
+    </div>
+  </header>
+
+  <div class="card" style="padding: 14px;">
+    <div class="row">
+      <input class="input" style="max-width:300px" placeholder="target (svc/web)" x-model="target" />
+      <input class="input" style="max-width:220px" placeholder="ports (8080:80)" x-model="ports" />
+      <button class="btn" @click="start()" :disabled="!target.trim() || !ports.trim()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-play"/></svg>
+        Start
+      </button>
+    </div>
+  </div>
+
+  <div class="table-wrap scroll" style="margin-top:18px">
+    <table class="table">
+      <thead><tr><th>ID</th><th>Target</th><th>Ports</th><th>NS</th><th>Ctx</th><th>PID</th><th>Age</th><th></th></tr></thead>
+      <tbody>
+        <template x-if="entries.length === 0">
+          <tr class="row-empty">
+            <td colspan="8">
+              <div class="empty" style="border: none; background: transparent; padding: 24px 0;">
+                <div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#i-globe"/></svg></div>
+                <h3>No active forwards</h3>
+                <p>Type a target above (e.g. <span class="mono">svc/web</span>) and a port mapping to start one.</p>
+              </div>
+            </td>
+          </tr>
+        </template>
+        <template x-for="e in entries" :key="e.id">
+          <tr>
+            <td class="mono" x-text="e.id"></td>
+            <td x-text="e.target"></td>
+            <td class="mono" x-text="e.ports.join(', ')"></td>
+            <td x-text="e.namespace"></td>
+            <td x-text="e.context"></td>
+            <td x-text="e.pid"></td>
+            <td x-text="e.age"></td>
+            <td class="right">
+              <button class="btn btn-ghost btn-sm" @click="logs(e.id)">
+                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-file-text"/></svg>
+                Logs
+              </button>
+              <button class="btn btn-danger btn-sm" @click="stop(e.id)">
+                <svg class="icon icon-sm" aria-hidden="true"><use href="#i-stop"/></svg>
+                Stop
+              </button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <div x-show="showLogs" class="fade-in" style="margin-top: 20px;">
+    <h2 style="margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">
+      Log tail · <span class="mono" style="color: var(--fg);" x-text="showLogs"></span>
+    </h2>
+    <pre class="logs" x-ref="logout"></pre>
+  </div>
+</section>
+{{end}}

@@ -163,19 +163,129 @@ Anything that needs scripting compatibility — `-o json|yaml|name|jsonpath`, pi
 
 ### Full-screen TUI (`sk tui`)
 
-A bubbletea-powered Pods browser, live-updating via a client-go informer.
+A bubbletea-powered browser for Pods, ConfigMaps, Secrets, and Ingresses, live-updating via client-go informers.
 
 | Key | Action |
 |---|---|
+| `1` / `2` / `3` / `4` | switch list: Pods / ConfigMaps / Secrets / Ingresses |
 | `j` / `k` (or arrows) | move cursor |
 | `g` / `G` | jump to top / bottom |
-| `/` | filter pods by name (esc clears) |
-| `enter` | open action menu for the selected pod |
-| `a` / `l` / `d` (in menu) | describe / logs `-f` / diagnose |
+| `/` | filter rows (esc clears) |
+| `enter` | open action menu for the selected row |
+| `Y` | show the resource YAML (Secret values stay masked) |
+| `e` | open `sk <kind> edit` in `$EDITOR` (ConfigMap/Secret/Ingress) |
+| `X` | delete with typed-name confirmation |
+| `l` / `d` / `D` / `y` / `e` (Pods only) | logs / describe / diagnose / why / events |
+| `x` (Pods only) | exec into the pod |
 | `?` | toggle help overlay |
 | `q` or `ctrl+c` | quit |
 
-Actions suspend the TUI, shell back into the matching `sk` subcommand (`sk describe`, `sk logs`, `sk diagnose`) so you get the same redaction, AI provider, and audit-log entry as if you'd typed the command directly. The TUI scope follows `-n` / `--namespace`; omit for all namespaces.
+Actions suspend the TUI and shell back into the matching `sk` subcommand (`sk describe`, `sk logs`, `sk configmap edit`, `sk delete configmap`, …) so you get the same policy gate, redaction, AI provider, and audit-log entry as if you'd typed the command directly. The TUI scope follows `-n` / `--namespace`; omit for all namespaces.
+
+### ConfigMaps, Secrets, Ingresses (`sk configmap`, `sk secret`, `sk ingress`)
+
+First-class view + edit verbs for the three most-edited Kubernetes objects, with aliases (`cm`, `sec`, `ing`), policy gating, and audit:
+
+```sh
+sk configmap view feature-flags             # styled YAML for the ConfigMap
+sk cm edit feature-flags                    # opens kubectl edit; policy + audit apply
+sk secret view db-credentials               # values masked: <base64 hidden — pass --reveal>
+sk secret view db-credentials --reveal      # base64-decoded values printed
+sk secret view db-credentials --reveal > t  # refuses in non-TTY without --yes
+sk ingress view web --reveal                # (no effect; --reveal is secret-only)
+sk ing edit web                             # edit the Ingress in $EDITOR
+```
+
+Notes:
+
+- `--reveal` decodes values from `data:`. To prevent accidental leaks into recorded sessions, files, or shared screens, non-TTY callers must add `--yes` to confirm intent.
+- `edit` shells out to `kubectl edit` so your `$EDITOR` and the usual save-to-apply flow are preserved. Forbid policy rules (next section) block edits exactly like they block deletes.
+- These objects also appear in the TUI (press `2`, `3`, `4`) and in the web UI (sidebar entries).
+
+### Web interface (`sk web`)
+
+A modern, browser-based control plane for the same superkube features. Launch it from a terminal:
+
+```sh
+sk web
+```
+
+The default opens `http://127.0.0.1:<auto-port>` in your browser. Every CLI verb has a screen — pods (live), workloads, services, nodes, **ConfigMaps / Secrets / Ingresses** (live + inline edit), logs (single, multi-pod, and AI-summarized), apply with diff preview, delete/scale/rollout/drain/cordon with the same typed-name and typed-phrase confirmations, port-forward manager, audit log viewer (filterable + follow), AI chat (`sk ai explain`), diagnose / why, config editor, and an embedded xterm.js terminal for pod exec.
+
+#### Running as a background service
+
+`sk web` is foreground by default — it dies when the terminal closes. To keep it running across reboots, install it as a user-level OS service:
+
+```sh
+sk web install                          # launchd LaunchAgent (macOS) or systemd --user unit (Linux)
+sk web install --port 7070              # pin a port instead of auto-picking
+sk web install --bind 0.0.0.0 --force   # replace an existing install
+sk web status                           # installed / loaded / running, URL, log paths
+sk web uninstall                        # stop and remove the unit file
+```
+
+The service runs `superkube web --bind … --port … --token … --no-open` with `KeepAlive` (launchd) / `Restart=on-failure` (systemd) so it relaunches if it crashes. Logs go to `$XDG_STATE_HOME/superkube/web.{log,err}`. No sudo is needed — everything lives under your user (`~/Library/LaunchAgents` or `~/.config/systemd/user`).
+
+On Linux, run `loginctl enable-linger $USER` once if you want the service to survive a full logout. macOS LaunchAgents survive logout by default.
+
+#### Workload actions
+
+Pod rows, workload rows, and node rows all surface a per-row `⋯` action menu. Every destructive action runs through the same guardrail policy and typed-name / typed-phrase confirmation flow the CLI uses — `--yes` is not bypassed by the UI, and `forbid:` rules block unconditionally.
+
+| Kind | Actions on the row menu |
+|---|---|
+| Pods | Logs, Exec, Port-forward, Describe, **Restart** (= delete pod; controller recreates), **Delete** |
+| Deployments / StatefulSets | Scale ±1, Scale to…, Rollout restart, Pause, Resume, History, **Undo** (with revision picker), Edit YAML, Describe, Delete |
+| DaemonSets | Rollout restart, History, Edit YAML, Describe, Delete |
+| ReplicaSets | Scale to…, Edit YAML, Describe, Delete |
+| Jobs / CronJobs | (cronjobs) **Trigger run**, Edit YAML, Describe, Delete |
+| Services / Ingresses / ConfigMaps / Secrets | Edit YAML, Describe, Delete |
+| Nodes | Cordon, Uncordon, **Drain**, Describe |
+
+The pod detail page header also adds **Restart**, **PF**, **Edit YAML** buttons next to the existing **Exec / Delete / Diagnose / Why?** controls.
+
+#### Helm releases
+
+If `helm` is on PATH (or any Helm 3 release secret exists in the cluster), a **Helm** nav link appears in the sidebar.
+
+- **Releases list** (`/helm`) — table of every release across namespaces with status pill, chart, app version, revision, and an action menu (View / Upgrade / Rollback… / Uninstall).
+- **Release detail** (`/helm/<ns>/<name>`) — tabbed view: **Values** (user values + a "computed" toggle for defaults-merged), **Manifest** (rendered YAML), **Notes**, **Hooks**, **History** (per-revision rollback button).
+- **Install** (`/helm/install`) — three-step flow: search a configured repo, pick a chart + version, edit values; preview runs `helm install --dry-run`; commit applies. Confirmation is a single-use 30-second token.
+- **Repos** (`/helm/repos`) — list, add (with optional basic-auth), update, remove. The password field is **redacted before being recorded in the audit log**.
+- **Helm not installed but releases exist** — if the secret scan finds Helm 3 release secrets but the `helm` binary isn't on PATH, the page renders a banner explaining the situation and linking to install instructions. Listing and detail endpoints return 503 with `{installed:false}` so the SPA degrades gracefully.
+
+Set `$HELM_BIN` to point to a non-PATH helm binary (mirrors how `$KUBECTL` works for the CLI).
+
+Guardrail policy applies to Helm operations under the verb `helm`. The argv passed to `IsForbidden` is the underlying `helm` argv (`["uninstall","my-app","-n","prod"]`, etc.), so you can express rules like:
+
+```yaml
+forbid:
+  - "helm uninstall *"     # block all uninstalls
+  - "helm rollback *"       # block all rollbacks
+```
+
+(Helm policy is best-effort — verbs and flags differ from kubectl; treat as a coarse safety net, not a replacement for cluster RBAC.)
+
+For ConfigMaps, Secrets, and Ingresses, clicking a row opens an editor with two modes — **Form** (the default) and **YAML** — and a per-tab View/Edit toggle:
+
+- **Form view** — kind-specific rendering: ConfigMap key/value pairs (multi-line aware), Secret keys with a *Show decoded values* toggle (encoding back to base64 is handled on save), Ingress class + TLS entries + rules with editable host / path / pathType / backend service-and-port. View mode is read-only; flipping to Edit mode unlocks every input and exposes add/remove buttons for entries.
+- **YAML view / edit** — the original textarea + diff preview. Useful for keys/fields the form doesn't surface, or for paste-in workflows. Secret YAML has a *Decode base64 values* reveal toggle, recorded in the audit log.
+
+Both modes converge on the same flow: **Preview diff** runs a server-side `kubectl diff` and **Confirm & apply** consumes a single-use 30-second token (same `ptyConfirmStore` the destructive actions use — no token, no apply). The form-edit path merges the user's changes into a typed `corev1.ConfigMap` / `corev1.Secret` / `networkingv1.Ingress` populated from the live YAML, so metadata, annotations, and any spec fields the UI doesn't expose round-trip untouched.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--port` | `0` | `0` picks a free port |
+| `--bind` | `127.0.0.1` | use `0.0.0.0` only on trusted networks; auto-generates `--token` |
+| `--token` | `""` | required when `--bind` is non-loopback |
+| `--no-open` | `false` | skip auto-opening the browser |
+
+Security notes:
+
+- The default binding is loopback-only with DNS-rebind protection on the `Host` header. A browser tab loaded from `evil.example` (rebound to `127.0.0.1`) cannot reach the server because its tab still sends `Host: evil.example`.
+- State-changing requests carry a per-session CSRF cookie/header pair; HTMX is wired to echo it automatically.
+- All audit, policy, and guardrail rules from the CLI apply identically — `forbid: ["delete --all"]` blocks the web action just as it blocks the CLI one. Typed-name and typed-phrase confirmations appear as focused modals; `--yes` is never bypassed by the UI.
+- Backend assets are vendored and embedded; the binary stays single. No external CDN is contacted.
 
 ### Multi-pod log tail
 
@@ -284,6 +394,10 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 | `sk ctx clean [--auto] [--preview]` | remove stale contexts: manual picker, or auto-probe `/version` and prune the unreachable ones | confirm |
 | `sk ns [name\|-]` | list / switch / previous namespace | n/a |
 | `sk tui` | full-screen pod browser with describe/logs/diagnose actions | n/a |
+| `sk web [--port N] [--bind addr] [--token T] [--no-open]` | browser-based control plane with parity to every sk verb; localhost-only by default | inherits all |
+| `sk web install [--port N] [--bind addr] [--token T] [--force]` | install `sk web` as a user-level background service (launchd on macOS, systemd `--user` on Linux); auto-starts on login | n/a |
+| `sk web uninstall` | stop the service and remove the unit file | confirm |
+| `sk web status` | report installed / loaded / running state, URL, token, log paths | n/a |
 | `sk ai explain "<q>"` | free-form AI question with current ctx/ns as light context | n/a |
 | `sk diagnose pod/<name>` | describe + events + logs + owner chain + sibling pods → AI explains | n/a |
 | `sk why pod/<name>` | tighter AI prompt for Pending / CrashLoop / ImagePull / OOM / probe failures | n/a |

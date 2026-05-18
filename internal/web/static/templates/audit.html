@@ -1,0 +1,71 @@
+{{define "audit.html"}}
+<section class="page slide-up" x-data="AuditPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Audit log</h1>
+      <p class="page-sub">Shared with the CLI · <span class="mono" x-text="path"></span></p>
+    </div>
+  </header>
+
+  <div class="card" style="padding: 14px;">
+    <div class="row">
+      <select class="select" style="max-width:180px" x-model="since">
+        <option value="">Any time</option>
+        <option value="1h">Last 1 hour</option>
+        <option value="24h">Last 24 hours</option>
+        <option value="7d">Last 7 days</option>
+      </select>
+      <input class="input" style="max-width:160px" placeholder="verb" x-model="verb" />
+      <input class="input" style="max-width:220px" placeholder="context" x-model="ctxFilter" />
+      <label class="checkrow"><input type="checkbox" x-model="failed" /> Failed only</label>
+      <label class="checkrow"><input type="checkbox" x-model="follow" @change="reopen()" /> Follow</label>
+      <span class="spacer"></span>
+      <button class="btn btn-ghost btn-sm" @click="reload()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-refresh"/></svg>
+        Refresh
+      </button>
+    </div>
+  </div>
+
+  <div class="table-wrap scroll" style="margin-top:18px">
+    <table class="table">
+      <thead><tr><th>Time</th><th>Verb</th><th>Ctx</th><th>NS</th><th>Argv</th><th>Exit</th><th>Dur</th></tr></thead>
+      <tbody>
+        <template x-if="loading">
+          <template x-for="i in 5" :key="i">
+            <tr>
+              <template x-for="j in 7" :key="j">
+                <td><span class="skel skel-line" :class="j === 5 ? 'w70' : 'w50'"></span></td>
+              </template>
+            </tr>
+          </template>
+        </template>
+        <template x-if="!loading && entries.length === 0">
+          <tr class="row-empty">
+            <td colspan="7">
+              <div class="empty" style="border: none; background: transparent; padding: 24px 0;">
+                <div class="empty-icon"><svg class="icon icon-lg" aria-hidden="true"><use href="#i-shield"/></svg></div>
+                <h3>No matching entries</h3>
+                <p>Adjust the filters or pick a wider time range.</p>
+              </div>
+            </td>
+          </tr>
+        </template>
+        <template x-if="!loading">
+          <template x-for="(e, i) in entries" :key="i">
+            <tr>
+              <td x-text="e.timestamp"></td>
+              <td><span class="pill" :class="e.exit_code===0 ? 'pill-info' : 'pill-danger'" x-text="e.verb"></span></td>
+              <td x-text="e.context"></td>
+              <td x-text="e.namespace"></td>
+              <td class="mono" x-text="(e.argv||[]).join(' ')" style="word-break: break-all;"></td>
+              <td><span class="pill" :class="e.exit_code===0 ? 'pill-success' : 'pill-danger'" x-text="e.exit_code"></span></td>
+              <td x-text="(e.duration_ms||0) + 'ms'"></td>
+            </tr>
+          </template>
+        </template>
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}

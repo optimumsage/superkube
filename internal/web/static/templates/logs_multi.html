@@ -1,0 +1,30 @@
+{{define "logs_multi.html"}}
+<section class="page slide-up" x-data="MultiLogsPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Multi-pod logs</h1>
+      <p class="page-sub">Tail logs from a workload or selector across all matching pods. Mirrors <span class="mono">sk logs --multi=TARGET</span>.</p>
+    </div>
+  </header>
+
+  <div class="card" style="padding: 14px;">
+    <div class="row">
+      <input class="input" style="max-width:400px" placeholder="deploy/web · sts/api · app=web" x-model="target" />
+      <input class="input" style="max-width:140px" placeholder="tail (200)" x-model.number="tail" />
+      <label class="checkrow"><input type="checkbox" x-model="follow" /> Follow</label>
+      <span class="spacer"></span>
+      <span class="pill pill-success pill-live" x-show="streaming">streaming</span>
+      <button class="btn" @click="start()" :disabled="!target.trim()">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-play"/></svg>
+        Start
+      </button>
+      <button class="btn btn-ghost" @click="stop()" :disabled="!streaming">
+        <svg class="icon icon-sm" aria-hidden="true"><use href="#i-stop"/></svg>
+        Stop
+      </button>
+    </div>
+  </div>
+
+  <pre class="logs" x-ref="out"></pre>
+</section>
+{{end}}

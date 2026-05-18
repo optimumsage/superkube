@@ -15,6 +15,17 @@ import (
 	"io"
 )
 
+// RunOpts toggles optional capabilities for a single Provider.Run call. The
+// zero value means "no tools, no extra capabilities" — the safe default used
+// everywhere except when the caller has explicitly asked for more.
+type RunOpts struct {
+	// AllowReadOnlyKubectl, if true, asks the provider to expose its Bash tool
+	// restricted to read-only kubectl/sk verbs. Providers that cannot enforce
+	// a per-command allowlist (e.g. gemini) should treat this as best-effort
+	// and rely on the prompt itself to constrain behavior.
+	AllowReadOnlyKubectl bool
+}
+
 // Provider is the abstraction over the local AI tools we know about. Each
 // implementation shells out to a binary on PATH; we never speak HTTP directly.
 type Provider interface {
@@ -32,6 +43,7 @@ type Provider interface {
 	// Run sends prompt to the provider and streams the response into out. The
 	// returned error reflects failures of the child process itself; semantic
 	// problems with the model's response (e.g., refusal) are part of the
-	// stream, not an error.
-	Run(ctx context.Context, prompt string, out io.Writer) error
+	// stream, not an error. opts is always honored as best-effort; an opt
+	// that a particular provider can't enforce is silently ignored.
+	Run(ctx context.Context, prompt string, out io.Writer, opts RunOpts) error
 }

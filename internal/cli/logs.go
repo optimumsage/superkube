@@ -108,7 +108,7 @@ func runLogs(cmd *cobra.Command, args []string) error {
 
 	w, stop := ui.SpinUntilFirstByte("asking "+provider.Name()+"…", os.Stdout)
 	defer stop()
-	if err := provider.Run(ctx, prompt, w); err != nil {
+	if err := provider.Run(ctx, prompt, w, ai.RunOpts{}); err != nil {
 		return fmt.Errorf("%s: %w", provider.Name(), err)
 	}
 	fmt.Fprintln(os.Stdout)

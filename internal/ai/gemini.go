@@ -33,7 +33,11 @@ func (geminiProvider) VersionString(ctx context.Context) string {
 // value but also appends stdin to it; we pass the prompt on stdin and an
 // empty -p value, mirroring what we do for claude. --yolo skips per-tool
 // approval prompts which would block in a non-TTY context.
-func (geminiProvider) Run(ctx context.Context, prompt string, w io.Writer) error {
+//
+// opts.AllowReadOnlyKubectl is honored on a best-effort basis: gemini's
+// permission model is all-or-nothing in headless mode, so the prompt itself
+// (templates in prompt.go) is what constrains the model to read-only verbs.
+func (geminiProvider) Run(ctx context.Context, prompt string, w io.Writer, _ RunOpts) error {
 	if w == nil {
 		return errors.New("gemini.Run: nil writer")
 	}

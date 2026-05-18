@@ -68,7 +68,7 @@ func runAIExplain(cmd *cobra.Command, args []string) error {
 
 	w, stopSpinner := ui.SpinUntilFirstByte("asking "+provider.Name()+"…", os.Stdout)
 	defer stopSpinner()
-	if err := provider.Run(ctx, prompt, w); err != nil {
+	if err := provider.Run(ctx, prompt, w, ai.RunOpts{}); err != nil {
 		return fmt.Errorf("%s: %w", provider.Name(), err)
 	}
 	fmt.Fprintln(os.Stdout)

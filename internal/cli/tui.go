@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,20 +20,24 @@ import (
 func newTUICmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "tui",
-		Short: "Full-screen pod browser with embedded describe/logs/diagnose/why/yaml/events",
-		Long: `Live, full-screen Pods table backed by a client-go informer.
+		Short: "Full-screen browser for pods / configmaps / secrets / ingresses",
+		Long: `Live, full-screen resource browser backed by client-go informers.
 
-Keys: j/k or arrows to move; / to filter; enter to open the action menu for
-the selected pod. Actions run inside the TUI as scrollable panes:
+Switch resource type with the number keys:
 
-  l  logs       — streamed via client-go (filter with /, follow with f)
-  d  describe   — kubectl describe pod output
-  Y  yaml       — kubectl get pod -o yaml
-  e  events     — recent events involving the pod
-  D  diagnose   — AI-summarized root cause (local claude/gemini)
-  y  why        — AI failure-mode classifier
-  x  exec       — opens an interactive shell (suspends TUI)
-  X  delete     — typed-name confirm in-TUI
+  1  Pods            (default)
+  2  ConfigMaps
+  3  Secrets         (data values masked in the YAML view)
+  4  Ingresses
+
+Then j/k or arrows to move, / to filter, enter to open the action menu, and:
+
+  Y  yaml view       — kubectl get <kind> -o yaml (masked for secrets)
+  e  edit            — opens 'sk <kind> edit' in your $EDITOR  (cm/sec/ing)
+  X  delete          — typed-name confirm in-TUI, then 'sk delete <kind>'
+
+Pods have extra actions: l (logs), d (describe), e (events), D (diagnose, AI),
+y (why, AI), x (exec).
 
 Honors -n / --namespace for the watched namespace (omit for all namespaces)
 and --context for the kubectl context. Refuses to run without a TTY.`,
@@ -71,10 +76,15 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 	if runnerErr == nil {
 		opts.Describe = makeDescribeProducer(runner)
-		opts.YAML = makeYAMLProducer(runner)
 		opts.Events = makeEventsProducer(runner)
 		opts.Diagnose = makeAIProducer(runner, "diagnose")
 		opts.Why = makeAIProducer(runner, "why")
+		opts.YAMLByKind = map[tui.Kind]tui.ProducerFn{
+			tui.KindPod:       makeYAMLProducer(runner, "pod"),
+			tui.KindConfigMap: makeYAMLProducer(runner, "configmap"),
+			tui.KindSecret:    makeSecretYAMLProducer(runner),
+			tui.KindIngress:   makeYAMLProducer(runner, "ingress"),
+		}
 	}
 	return tui.Run(cmd.Context(), opts)
 }
@@ -105,13 +115,33 @@ func makeDescribeProducer(runner *kubectl.Runner) tui.ProducerFn {
 	}
 }
 
-func makeYAMLProducer(runner *kubectl.Runner) tui.ProducerFn {
+func makeYAMLProducer(runner *kubectl.Runner, kind string) tui.ProducerFn {
 	return func(ctx context.Context, ns, name string, w io.Writer) error {
-		args := []string{"get", "pod", name, "-o", "yaml"}
+		args := []string{"get", kind, name, "-o", "yaml"}
 		if ns != "" {
 			args = append(args, "-n", ns)
 		}
 		return runner.Run(ctx, args, kubectl.RunOpts{Stdout: w, Stderr: w})
+	}
+}
+
+// makeSecretYAMLProducer renders a secret's YAML with `data:` values masked,
+// matching the default safety behavior of `sk secret view`. The TUI view is
+// always read-only, so we don't expose a `--reveal` shortcut here — users
+// who need decoded values run `sk secret view <name> --reveal` from a real
+// shell where the audit + non-TTY guardrail applies.
+func makeSecretYAMLProducer(runner *kubectl.Runner) tui.ProducerFn {
+	return func(ctx context.Context, ns, name string, w io.Writer) error {
+		args := []string{"get", "secret", name, "-o", "yaml"}
+		if ns != "" {
+			args = append(args, "-n", ns)
+		}
+		var buf bytes.Buffer
+		if err := runner.Run(ctx, args, kubectl.RunOpts{Stdout: &buf, Stderr: w}); err != nil {
+			return err
+		}
+		_, err := io.WriteString(w, maskSecretYAML(buf.String()))
+		return err
 	}
 }
 
@@ -151,7 +181,7 @@ func makeAIProducer(runner *kubectl.Runner, template string) tui.ProducerFn {
 			return err
 		}
 		fmt.Fprintf(w, "\nasking %s…\n\n", provider.Name())
-		if err := provider.Run(ctx, prompt, w); err != nil {
+		if err := provider.Run(ctx, prompt, w, ai.RunOpts{}); err != nil {
 			return fmt.Errorf("%s: %w", provider.Name(), err)
 		}
 		return nil

@@ -1,0 +1,95 @@
+{{define "ai.html"}}
+<section class="page slide-up" x-data="AIPage()">
+  <header class="page-head">
+    <div class="page-head-text">
+      <h1 class="page-title">Ask AI</h1>
+      <p class="page-sub">
+        <span>Streams from your local</span>
+        <span class="pill pill-info" x-show="provider"><span class="mono" x-text="provider"></span></span>
+        <span class="pill pill-danger" x-show="!provider">no provider detected</span>
+        <span>CLI. No outbound network calls from superkube.</span>
+      </p>
+    </div>
+  </header>
+
+  <div class="ai-panel" style="margin-bottom: 18px;">
+    <div class="ai-panel-head">
+      <span class="ai-avatar"><svg aria-hidden="true"><use href="#i-sparkles"/></svg></span>
+      <div style="min-width: 0; flex: 1;">
+        <h3 class="ai-head-title">Free-form prompt</h3>
+        <p class="ai-head-sub">
+          <template x-if="busy"><span class="ai-streaming">streaming…</span></template>
+          <template x-if="!busy && answer"><span><svg class="icon icon-sm" aria-hidden="true" style="color: var(--success); width: 12px; height: 12px;"><use href="#i-check"/></svg> Response ready</span></template>
+          <template x-if="!busy && !answer && !error"><span>Ask anything about your cluster.</span></template>
+        </p>
+      </div>
+    </div>
+
+    <div style="padding: 16px 18px 0;">
+      <textarea
+        class="textarea"
+        style="min-height: 120px"
+        x-model="question"
+        placeholder="e.g. Why is my pod in CrashLoopBackOff?"
+        @keydown.meta.enter="ask()"
+        @keydown.ctrl.enter="ask()"
+      ></textarea>
+      <div class="row" style="margin-top: 10px; gap: 12px; flex-wrap: wrap;">
+        <label class="checkrow">
+          <input type="checkbox" x-model="withContext" />
+          Attach cluster context (ctx + namespace)
+        </label>
+        <label class="checkrow" :title="provider === 'claude' ? 'Lets Claude run kubectl/sk read-only verbs (get, describe, logs, events, top, …). Writes are always blocked.' : 'Best-effort for ' + (provider || 'this provider') + ' — only claude can strictly enforce the allowlist.'">
+          <input type="checkbox" x-model="allowReadOnly" />
+          Allow <span x-text="provider || 'AI'"></span> to run read-only commands
+        </label>
+        <span class="spacer"></span>
+        <span class="subtle" style="font-size: 11.5px;">⌘↵ to send</span>
+        <button class="btn btn-ai" @click="ask()" :disabled="busy || !question.trim() || !provider">
+          <template x-if="!busy">
+            <svg class="icon icon-sm" aria-hidden="true"><use href="#i-sparkles"/></svg>
+          </template>
+          <template x-if="busy">
+            <span class="spinner spinner-sm" style="border-color: rgba(255,255,255,0.4); border-top-color: white;"></span>
+          </template>
+          <span x-text="busy ? 'Streaming' : 'Ask'"></span>
+        </button>
+      </div>
+    </div>
+
+    <template x-if="error">
+      <div class="ai-error">
+        <strong>AI error:</strong> <span x-text="error"></span>
+      </div>
+    </template>
+
+    <template x-if="!error && !answer && !busy">
+      <div class="ai-body is-empty">
+        <div class="empty-icon"><svg class="icon icon-xl" aria-hidden="true"><use href="#i-sparkles"/></svg></div>
+        <h3 style="margin: 0 0 4px; color: var(--fg-strong); font-size: 14px;">Ask anything</h3>
+        <p style="font-size: 13px;">Pick a sample below or type your own question. Cluster context is included by default.</p>
+      </div>
+    </template>
+
+    <template x-if="answer || (busy && !error)">
+      <div class="ai-body" :class="busy && 'ai-cursor'">
+        <span x-text="answer"></span>
+      </div>
+    </template>
+  </div>
+
+  <h2 style="margin: 24px 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-subtle); font-weight: 700;">Try one</h2>
+  <div class="cards-row">
+    <template x-for="(ex, i) in examples" :key="i">
+      <a class="card action" @click="useExample(ex)" style="cursor: pointer;">
+        <div class="card-head">
+          <span class="card-icon" style="color: var(--amber); background: var(--ai-soft); border-color: rgba(245,158,11,0.3);">
+            <svg class="icon" aria-hidden="true"><use href="#i-message"/></svg>
+          </span>
+          <h3 style="font-size: 13.5px;" x-text="ex"></h3>
+        </div>
+      </a>
+    </template>
+  </div>
+</section>
+{{end}}

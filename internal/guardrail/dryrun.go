@@ -21,8 +21,8 @@ type DryRunResult struct {
 }
 
 // PreviewApply shells out to `kubectl diff <args>` to compute a server-side
-// dry-run diff and prints it (colored) to stderr. kubectl's exit codes here
-// are well-defined:
+// dry-run diff and renders it (colored) to the provided writer. kubectl's
+// exit codes here are well-defined:
 //
 //	0  no differences
 //	1  differences detected (this is normal, not an error)
@@ -34,7 +34,17 @@ type DryRunResult struct {
 // kubectlArgs should be the same set of args the user passed to `apply` —
 // e.g. ["-f", "deploy.yaml", "-n", "default"]. Caller is responsible for
 // stripping --dry-run flags from the original args before calling.
-func PreviewApply(ctx context.Context, runner *kubectl.Runner, kubectlArgs []string) (DryRunResult, error) {
+//
+// out is the writer the colored diff is rendered to (CLI passes os.Stderr;
+// web handler passes a bytes.Buffer). A nil writer is treated as io.Discard
+// so callers that only care about HasChanges don't have to materialize one.
+func PreviewApply(ctx context.Context, runner *kubectl.Runner, kubectlArgs []string, out io.Writer) (DryRunResult, error) {
+	if out == nil {
+		out = io.Discard
+	}
+	if runner == nil {
+		return DryRunResult{}, fmt.Errorf("kubectl runner is nil")
+	}
 	args := append([]string{"diff"}, kubectlArgs...)
 	var stdout, stderr bytes.Buffer
 	err := runner.Run(ctx, args, kubectl.RunOpts{
@@ -47,18 +57,18 @@ func PreviewApply(ctx context.Context, runner *kubectl.Runner, kubectlArgs []str
 	switch {
 	case err == nil:
 		// Exit 0: no differences.
-		fmt.Fprintln(os.Stderr, ui.Render(ui.Subtle, "no differences (cluster matches manifest)"))
+		fmt.Fprintln(out, ui.Render(ui.Subtle, "no differences (cluster matches manifest)"))
 		return DryRunResult{HasChanges: false, Printed: true}, nil
 	case errors.As(err, &ee) && ee.Code == 1:
-		// Exit 1: differences. Print colored diff to stderr.
-		if err := renderKubectlDiff(os.Stderr, stdout.String()); err != nil {
+		// Exit 1: differences. Render colored diff to the caller's writer.
+		if err := renderKubectlDiff(out, stdout.String()); err != nil {
 			return DryRunResult{}, err
 		}
 		return DryRunResult{HasChanges: true, Printed: true}, nil
 	default:
 		// Something else went wrong. Surface stderr so the user can act.
 		if stderr.Len() > 0 {
-			io.Copy(os.Stderr, &stderr)
+			io.Copy(out, &stderr)
 		}
 		return DryRunResult{}, fmt.Errorf("kubectl diff failed: %w", err)
 	}

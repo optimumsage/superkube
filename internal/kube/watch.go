@@ -88,8 +88,15 @@ func (l Loader) WatchTable(ctx context.Context, opts WatchTableOpts, render func
 		if opts.Selector != "" {
 			req = req.Param("labelSelector", opts.Selector)
 		}
+		// Accept header MUST use "v=v1" (not "v=1") — that's the meta.k8s.io
+		// API version. With "v=1" the apiserver silently ignores the Table
+		// preference and falls through to returning a regular PodList, which
+		// then unmarshals into an empty metav1.Table (no columns, no rows).
+		// This matches what kubectl sends.
 		req = req.SetHeader("Accept",
-			"application/json;as=Table;v=1;g=meta.k8s.io,application/json")
+			"application/json;as=Table;v=v1;g=meta.k8s.io,"+
+				"application/json;as=Table;v=v1beta1;g=meta.k8s.io,"+
+				"application/json")
 		raw, err := req.DoRaw(ctx)
 		if err != nil {
 			return "", err
