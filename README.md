@@ -9,7 +9,7 @@ A safer, prettier, AI-assisted wrapper around `kubectl`.
 `superkube` (binary: `superkube`, alias: `sk`) is **not** a replacement for `kubectl` — it wraps the `kubectl` you already have installed and adds:
 
 - **Guardrails** — typed confirmation for destructive operations, dry-run-by-default for writes with a colored diff preview, and a local audit log of every command you've run.
-- **On-demand AI** — `sk diagnose pod/foo`, `sk why pod/bar`, `sk logs --ai`, `sk ai explain "…"`. Uses your **local** `claude` or `gemini` CLI under your account; no calls anywhere else.
+- **On-demand AI** — `sk diagnose pod/foo`, `sk why pod/bar`, `sk logs --ai`, `sk ai explain "…"`. Uses your **local** `claude` or `agy` (Antigravity) CLI under your account; no calls anywhere else.
 - **Live UI** — refreshing tables for `sk get -w`, a full-screen TUI (`sk tui`), colored multi-pod log tails, and per-context safety banners.
 - **Convenience** — fast context and namespace switching (`sk ctx`, `sk ns`) with a fuzzy picker.
 - **Everything else still works** — unknown verbs (including [`krew`](https://krew.sigs.k8s.io/) plugins) pass through to `kubectl` verbatim. Your kubeconfig, contexts, plugins, and aliases all keep working.
@@ -56,7 +56,7 @@ sk upgrade --force          # reinstall even if already up to date
 |---|---|---|
 | `kubectl` | v1.18+ | yes (server-side dry-run depends on it) |
 | `claude` | any recent | optional — for AI commands |
-| `gemini` | any recent | optional — for AI commands (fallback) |
+| `agy` (Antigravity) | any recent | optional — for AI commands (fallback) |
 
 Run `sk version` to confirm everything's wired up.
 
@@ -138,14 +138,20 @@ Run `sk config init` to write a starter file with comments.
 
 ### AI assistance
 
-AI commands run your **local** `claude` or `gemini` CLI under your account. No data is sent to any other service. Auto-detection prefers `claude`, falls back to `gemini`. Override with `--ai claude|gemini` or `SUPERKUBE_AI=…`.
+AI commands run your **local** `claude` or `agy` (Antigravity) CLI under your account. No data is sent to any other service. Auto-detection prefers `claude`, falls back to `antigravity`. Override with `--ai claude|antigravity` or `SUPERKUBE_AI=…`.
 
 | Command | When to use |
 |---|---|
 | `sk ai explain "<question>"` | Free-form question with current context/namespace as light context. |
 | `sk diagnose pod/<name>` | Open-ended investigation. Gathers describe + events + last 200 log lines + the workload's owner chain + sibling pods, then asks for a summary, root cause, and next steps. |
 | `sk why pod/<name>` | Tighter prompt that enumerates Pending / CrashLoopBackOff / ImagePullBackOff / OOMKilled / probe-failure causes and asks the model to pick one with cited evidence. |
-| `sk logs <pod> --ai` | Summarize errors in the log tail (default `--tail=200`). Incompatible with `-f`. |
+| `sk logs <pod> --ai` | Summarize errors in the log tail (default `--tail=200`). Incompatible with `-f` and `--no-context`. |
+
+**Flags for AI commands:**
+
+- `--tools` — let the provider run **read-only** kubectl/sk commands (get, describe, logs, events, top, …) to gather evidence itself instead of stopping at the pre-gathered payload. With `claude` this is enforced by an allowlist (no state-mutating verbs); with `antigravity` it is best-effort via the prompt. Applies to `sk ai explain` and `sk diagnose`. The AI timeout defaults to **5m** when `--tools` is set (single-shot prompts default to 90s).
+- `--ai-timeout <dur>` — override how long to wait for a response, e.g. `--ai-timeout 3m`.
+- `--no-context` — send only the literal prompt with **no** cluster data attached. For `sk diagnose`/`sk why` this suppresses describe/events/logs/owner-chain/siblings entirely; `sk logs --ai` rejects it (the log tail is the only data it has to analyze).
 
 **Privacy note.** Before sending any prompt, `superkube` redacts:
 
@@ -155,7 +161,7 @@ AI commands run your **local** `claude` or `gemini` CLI under your account. No d
 - `Bearer` / `Basic` auth header values
 - ServiceAccount tokens, image-pull secrets, TLS cert/key data
 
-Redaction is **best-effort, not security**. If your prompt contains free-form pasted output, review before sending. Use `--no-context` to send the literal prompt with no cluster data attached.
+Redaction is **best-effort, not security**. If your prompt contains free-form pasted output, review before sending. Use `--no-context` to send the literal prompt with no cluster data attached at all.
 
 ### Pretty `get`, `describe`, `logs`
 
@@ -446,7 +452,7 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 
 | Variable | Effect |
 |---|---|
-| `SUPERKUBE_AI` | force a specific AI provider (`claude` or `gemini`). |
+| `SUPERKUBE_AI` | force a specific AI provider (`claude` or `antigravity`). |
 | `NO_COLOR` | disable all colored output (equivalent to `--plain`). |
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` | override the config and state directories. |
 | `KUBECONFIG` | standard kubectl override; superkube respects it. |
@@ -457,12 +463,14 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 --context <name>       kubectl context to use
 -n, --namespace <ns>   namespace to use
 --kubeconfig <path>    path to kubeconfig
---ai claude|gemini     force AI provider (overrides auto-detect)
+--ai claude|antigravity  force AI provider (overrides auto-detect)
 --yes                  skip confirmation prompts (never bypasses policy forbids)
 --dry-run auto|server|client|none
 --plain                disable color/TUI output
 --audit on|off         audit logging
 --no-context           AI: send only the literal prompt, no cluster data
+--tools                AI: allow read-only kubectl to investigate (claude-enforced)
+--ai-timeout <dur>     AI: max wait for a response (default 90s, 5m with --tools)
 -v, --verbose
 ```
 
@@ -482,10 +490,10 @@ The installer prints a hint when this is the case.
 
 ### "AI provider not found"
 
-`sk diagnose` / `sk why` / `sk logs --ai` need either `claude` or `gemini` on your `PATH`. Install one:
+`sk diagnose` / `sk why` / `sk logs --ai` need either `claude` or `agy` (Antigravity) on your `PATH`. Install one:
 
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) — `npm i -g @anthropic-ai/claude-code`
-- [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- Antigravity CLI (`agy`)
 
 Then run `sk version` to confirm it's detected.
 
@@ -531,7 +539,7 @@ Please include the output of `sk version` and a redacted excerpt of `sk audit lo
 
 ## Privacy
 
-- **AI calls stay local.** AI commands shell out to `claude` or `gemini` on your machine, running under your existing account. superkube never sends data to any other service.
+- **AI calls stay local.** AI commands shell out to `claude` or `agy` (Antigravity) on your machine, running under your existing account. superkube never sends data to any other service.
 - **Best-effort redaction.** Secret-shaped fields are stripped from prompts before they leave the process, but redaction can't catch everything. Use `--no-context` for a pure-prompt mode.
 - **No telemetry.** superkube does not phone home. The only files it writes are your config, your audit log, and (via `sk ctx` / `sk ns`) your own kubeconfig.
 

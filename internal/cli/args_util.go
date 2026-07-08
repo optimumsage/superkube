@@ -114,6 +114,30 @@ func stripFlag(args []string, name string) []string {
 	return out
 }
 
+// stripFlagWithValue removes a value-taking flag from args in both forms:
+// `--name=value` (one token) and `--name value` (two tokens). Used by
+// DisableFlagParsing commands to drop superkube-internal flags like
+// --ai-timeout before forwarding the rest to kubectl, which would reject them.
+func stripFlagWithValue(args []string, name string) []string {
+	out := make([]string, 0, len(args))
+	skipNext := false
+	for _, a := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if a == name {
+			skipNext = true // drop the following value token too
+			continue
+		}
+		if strings.HasPrefix(a, name+"=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // firstPositional returns the first non-flag token in args, or "" if none.
 // Naive: treats "--name=value" as a flag, "-x" as a flag, but does not know
 // whether "-x" consumes the next token. For our use cases this is fine.

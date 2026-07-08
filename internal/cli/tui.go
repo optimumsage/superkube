@@ -168,14 +168,14 @@ func makeAIProducer(runner *kubectl.Runner, template string) tui.ProducerFn {
 		provider, err := ai.Detect(Flags.AIProvider)
 		if err != nil {
 			fmt.Fprintf(w, "(ai unavailable: %v)\n", err)
-			fmt.Fprintln(w, "Install `claude` or `gemini` on PATH, or pin --ai=<name>.")
+			fmt.Fprintln(w, "Install `claude` or `agy` on PATH, or pin --ai=<name>.")
 			return nil
 		}
 		recordAIProvider(provider.Name())
 
 		fmt.Fprintf(w, "gathering describe / events / logs for pod %s/%s…\n", ns, name)
 		resource := "pod/" + name
-		inputs := gatherDiagnosticNS(ctx, runner, resource, "pod", name, ns)
+		inputs := gatherDiagnosticNS(ctx, runner, resource, "pod", name, ns, template == "diagnose")
 		prompt, err := ai.Render(template, inputs)
 		if err != nil {
 			return err

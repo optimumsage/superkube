@@ -1,7 +1,6 @@
 package ai
 
 import (
-	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,14 +9,14 @@ import (
 
 // ErrNoProvider is returned when no AI binary is available and the user has
 // not pinned one explicitly.
-var ErrNoProvider = errors.New("no AI provider found on PATH (install `claude` or `gemini`, or pass --ai)")
+var ErrNoProvider = errors.New("no AI provider found on PATH (install `claude` or `agy`, or pass --ai)")
 
 // Detect returns the Provider the user should use. Precedence:
 //
-//  1. explicit (--ai flag passed by the caller — e.g. "claude", "gemini")
+//  1. explicit (--ai flag passed by the caller — e.g. "claude", "antigravity")
 //  2. $SUPERKUBE_AI env var
 //  3. config file (wired in later; for now this falls through)
-//  4. PATH lookup: claude, then gemini
+//  4. PATH lookup: claude, then antigravity
 //
 // If the explicit choice can't be resolved (binary missing), the caller gets
 // an error rather than silent fallback — silent fallback would surprise users
@@ -33,22 +32,22 @@ func Detect(explicit string) (Provider, error) {
 			return nil, errors.New("claude not found on PATH (you pinned --ai=claude)")
 		}
 		return &claudeProvider{}, nil
-	case "gemini":
-		if _, err := exec.LookPath("gemini"); err != nil {
-			return nil, errors.New("gemini not found on PATH (you pinned --ai=gemini)")
+	case "antigravity", "agy":
+		if _, err := exec.LookPath("agy"); err != nil {
+			return nil, errors.New("agy not found on PATH (you pinned --ai=antigravity)")
 		}
-		return &geminiProvider{}, nil
+		return &antigravityProvider{}, nil
 	case "":
 		// Auto-detect.
 	default:
-		return nil, errors.New("unknown AI provider: " + explicit + " (supported: claude, gemini)")
+		return nil, errors.New("unknown AI provider: " + explicit + " (supported: claude, antigravity)")
 	}
 
 	if _, err := exec.LookPath("claude"); err == nil {
 		return &claudeProvider{}, nil
 	}
-	if _, err := exec.LookPath("gemini"); err == nil {
-		return &geminiProvider{}, nil
+	if _, err := exec.LookPath("agy"); err == nil {
+		return &antigravityProvider{}, nil
 	}
 	return nil, ErrNoProvider
 }
@@ -60,6 +59,5 @@ func DetectName(explicit string) string {
 	if err != nil {
 		return "(none)"
 	}
-	_ = context.TODO
 	return p.Name()
 }

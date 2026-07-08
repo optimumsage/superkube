@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -28,9 +27,13 @@ func newAIExplainCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "explain QUESTION",
 		Short: "Ask the local AI provider a Kubernetes question",
-		Long: `Sends QUESTION to the local AI provider (claude preferred, gemini fallback)
-and streams the response. The current kubectl context and namespace are
-attached as light context unless --no-context is set.
+		Long: `Sends QUESTION to the local AI provider (claude preferred, antigravity
+fallback) and streams the response. The current kubectl context and namespace
+are attached as light context unless --no-context is set.
+
+Pass --tools to let the provider run read-only kubectl/sk commands to answer
+(claude enforces the read-only allowlist; antigravity is best-effort via the
+prompt). --ai-timeout overrides how long to wait for a response.
 
 This command never sends data to a remote service of our own — the provider
 binary runs on your machine under your account.`,
@@ -51,11 +54,10 @@ func runAIExplain(cmd *cobra.Command, args []string) error {
 	}
 	recordAIProvider(provider.Name())
 
-	inputs := ai.PromptInputs{Question: question}
+	inputs := ai.PromptInputs{Question: question, ToolsAllowed: Flags.Tools}
 	if !Flags.NoContext {
 		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: Flags.Context}
-		inputs.Context, _ = loader.CurrentContext()
-		inputs.Namespace, _ = loader.CurrentNamespace()
+		inputs.Context, inputs.Namespace, _ = loader.CurrentContextAndNamespace()
 	}
 
 	prompt, err := ai.Render("explain", inputs)
@@ -63,12 +65,12 @@ func runAIExplain(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), resolveAITimeout(Flags.Tools))
 	defer cancel()
 
 	w, stopSpinner := ui.SpinUntilFirstByte("asking "+provider.Name()+"…", os.Stdout)
 	defer stopSpinner()
-	if err := provider.Run(ctx, prompt, w, ai.RunOpts{}); err != nil {
+	if err := provider.Run(ctx, prompt, w, ai.RunOpts{AllowReadOnlyKubectl: Flags.Tools}); err != nil {
 		return fmt.Errorf("%s: %w", provider.Name(), err)
 	}
 	fmt.Fprintln(os.Stdout)

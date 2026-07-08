@@ -26,18 +26,7 @@ func (l Loader) OwnerChain(ctx context.Context, ns, podName string) (string, err
 	if err != nil {
 		return "", err
 	}
-
-	parts := []string{"pod/" + pod.Name}
-	kind, name := controller(pod.OwnerReferences)
-	for kind != "" {
-		parts = append(parts, shortKind(kind)+"/"+name)
-		next, nextName, ok := lookupOwner(ctx, cs, ns, kind, name)
-		if !ok {
-			break
-		}
-		kind, name = next, nextName
-	}
-	return strings.Join(parts, " ← "), nil
+	return ownerChainFromPod(ctx, cs, ns, pod), nil
 }
 
 // SiblingPods returns one-line summaries of pods sharing podName's immediate
@@ -52,6 +41,47 @@ func (l Loader) SiblingPods(ctx context.Context, ns, podName string) (string, er
 	if err != nil {
 		return "", err
 	}
+	return siblingPodsFromPod(ctx, cs, ns, pod)
+}
+
+// EnrichPod returns both the owner chain and the sibling-pod summary for a pod
+// in one shot, building the clientset once and fetching the pod exactly once.
+// Prefer this over separate OwnerChain + SiblingPods calls (which each build a
+// clientset and re-GET the same pod). Best-effort: on any error it returns
+// whatever was resolved so far so diagnose can still render a partial result.
+func (l Loader) EnrichPod(ctx context.Context, ns, podName string) (ownerChain, siblingPods string, err error) {
+	cs, err := l.Clientset()
+	if err != nil {
+		return "", "", err
+	}
+	pod, err := cs.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return "", "", err
+	}
+	ownerChain = ownerChainFromPod(ctx, cs, ns, pod)
+	siblingPods, err = siblingPodsFromPod(ctx, cs, ns, pod)
+	return ownerChain, siblingPods, err
+}
+
+// ownerChainFromPod builds the "pod/foo ← rs/… ← deploy/…" chain from an
+// already-fetched pod, walking its owner references upward.
+func ownerChainFromPod(ctx context.Context, cs kubernetes.Interface, ns string, pod *corev1.Pod) string {
+	parts := []string{"pod/" + pod.Name}
+	kind, name := controller(pod.OwnerReferences)
+	for kind != "" {
+		parts = append(parts, shortKind(kind)+"/"+name)
+		next, nextName, ok := lookupOwner(ctx, cs, ns, kind, name)
+		if !ok {
+			break
+		}
+		kind, name = next, nextName
+	}
+	return strings.Join(parts, " ← ")
+}
+
+// siblingPodsFromPod enumerates pods sharing an already-fetched pod's immediate
+// controller. Empty string when the pod has no controller.
+func siblingPodsFromPod(ctx context.Context, cs kubernetes.Interface, ns string, pod *corev1.Pod) (string, error) {
 	kind, name := controller(pod.OwnerReferences)
 	if kind == "" {
 		return "", nil

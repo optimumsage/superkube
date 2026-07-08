@@ -18,7 +18,9 @@ Use this when you know a pod isn't running and want a focused diagnosis.
 Use ` + "`sk diagnose`" + ` for open-ended investigation.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAIDiagnostic(cmd, args[0], "why")
+			// why is a focused single-shot: no owner/sibling enrichment (its
+			// template renders neither) and no read-only tool access.
+			return runAIDiagnostic(cmd, args[0], "why", false, false)
 		},
 	}
 }

@@ -64,6 +64,19 @@ Current kubectl context: {{ if .Context }}{{ .Context }}{{ else }}(default){{ en
 Current namespace: {{ if .Namespace }}{{ .Namespace }}{{ else }}default{{ end }}
 `
 
+// toolsBlock is shared framing for the read-only agentic path. It's injected
+// into the diagnose/why templates when ToolsAllowed is set so the model knows
+// it may gather more evidence itself instead of stopping at the payload below.
+const toolsBlock = `{{ if .ToolsAllowed }}
+You have permission to run read-only kubectl/sk commands via the Bash tool
+(get, describe, logs, events, top, explain, api-resources, api-versions,
+version, cluster-info, auth can-i, config view/get-contexts/current-context) to
+gather additional evidence beyond the data already provided below. You MUST NOT
+run any command that mutates state (apply, create, delete, edit, patch, replace,
+scale, rollout, cordon, drain, exec, port-forward, debug, attach). Prefer the
+smallest set of commands needed. Always pass -n/--namespace explicitly.
+{{ end }}`
+
 const tmplExplain = preamble + `
 {{ if .ToolsAllowed -}}
 You have permission to run read-only kubectl/sk commands via the Bash tool
@@ -85,7 +98,7 @@ User question:
 {{ .Question }}
 `
 
-const tmplDiagnose = preamble + `
+const tmplDiagnose = preamble + toolsBlock + `
 Diagnose the following Kubernetes workload. Provide:
   1. A one-line summary of the current state.
   2. The most likely root cause, with the specific event/log line(s) as evidence.
@@ -117,7 +130,7 @@ Resource: {{ .Resource }}
 {{- end }}
 `
 
-const tmplWhy = preamble + `
+const tmplWhy = preamble + toolsBlock + `
 The following pod is not running as expected. Identify which of these failure
 modes applies, citing the evidence:
   - ImagePullBackOff / ErrImagePull (registry, auth, or tag issues)

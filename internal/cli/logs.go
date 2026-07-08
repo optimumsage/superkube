@@ -69,8 +69,19 @@ func runLogs(cmd *cobra.Command, args []string) error {
 	if hasFlag(args, "-f") || hasFlag(args, "--follow") {
 		return errors.New("logs --ai cannot be combined with -f / --follow (analysis runs on a finite buffer)")
 	}
+	// --no-context promises "no cluster data" — but the log tail IS the data
+	// this command analyzes, so there'd be nothing left to summarize. Because
+	// this command uses DisableFlagParsing, --no-context placed after the verb
+	// never binds to Flags.NoContext, so scan args directly too.
+	if Flags.NoContext || hasFlag(args, "--no-context") {
+		return errors.New("logs --ai cannot be combined with --no-context (the log tail is the only data it analyzes)")
+	}
 
+	// Drop superkube-internal AI flags before forwarding to kubectl, which would
+	// reject them. --ai/--tools are booleans; --ai-timeout takes a value.
 	kubectlArgs := stripFlag(args, "--ai")
+	kubectlArgs = stripFlag(kubectlArgs, "--tools")
+	kubectlArgs = stripFlagWithValue(kubectlArgs, "--ai-timeout")
 	// Default to a reasonable tail when the user didn't pick one — full pod
 	// history can be huge and the model has a context limit.
 	if !hasFlag(kubectlArgs, "--tail") {
@@ -82,7 +93,21 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 90*time.Second)
+	// logs --ai is a single-shot summary (no tool access), so resolve the
+	// timeout without tools. DisableFlagParsing means the persistent flag may
+	// not be bound from tokens after the verb, so also read --ai-timeout inline.
+	aiTimeout := Flags.AITimeout
+	if aiTimeout <= 0 {
+		if v, ok := flagValue(args, "--ai-timeout"); ok {
+			if d, perr := time.ParseDuration(v); perr == nil {
+				aiTimeout = d
+			}
+		}
+	}
+	if aiTimeout <= 0 {
+		aiTimeout = defaultAITimeout
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), aiTimeout)
 	defer cancel()
 
 	var stdout, stderr bytes.Buffer
@@ -108,11 +133,9 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		Resource: positionalArgs(args)[0],
 		Logs:     ai.TruncateLogs(logs, 200),
 	}
-	if !Flags.NoContext {
-		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: Flags.Context}
-		inputs.Context, _ = loader.CurrentContext()
-		inputs.Namespace, _ = loader.CurrentNamespace()
-	}
+	// --no-context is rejected above, so cluster context is always attached here.
+	loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: Flags.Context}
+	inputs.Context, inputs.Namespace, _ = loader.CurrentContextAndNamespace()
 
 	prompt, err := ai.Render("logs", inputs)
 	if err != nil {

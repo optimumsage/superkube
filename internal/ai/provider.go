@@ -1,6 +1,6 @@
-// Package ai shells out to the user's local `claude` or `gemini` CLI to
-// produce analysis, explanations, and diagnostics. The crucial guarantee here
-// is that everything is best-effort and the user is always in control:
+// Package ai shells out to the user's local `claude` or `agy` (Antigravity)
+// CLI to produce analysis, explanations, and diagnostics. The crucial guarantee
+// here is that everything is best-effort and the user is always in control:
 //
 //   - We never call the provider unless the user explicitly invoked an
 //     AI-flavored command (`sk ai`, `sk diagnose`, `sk why`, `sk logs --ai`).
@@ -21,8 +21,8 @@ import (
 type RunOpts struct {
 	// AllowReadOnlyKubectl, if true, asks the provider to expose its Bash tool
 	// restricted to read-only kubectl/sk verbs. Providers that cannot enforce
-	// a per-command allowlist (e.g. gemini) should treat this as best-effort
-	// and rely on the prompt itself to constrain behavior.
+	// a per-command allowlist (e.g. antigravity) should treat this as
+	// best-effort and rely on the prompt itself to constrain behavior.
 	AllowReadOnlyKubectl bool
 }
 

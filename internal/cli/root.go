@@ -37,6 +37,8 @@ type PersistentFlags struct {
 	Verbose    bool
 	Audit      string
 	NoContext  bool
+	Tools      bool
+	AITimeout  time.Duration
 }
 
 // Flags is the parsed root flag set. Populated by cobra before any RunE fires.
@@ -159,13 +161,15 @@ func NewRootCmd() *cobra.Command {
 	f.StringVar(&Flags.Context, "context", "", "kubeconfig context to use")
 	f.StringVarP(&Flags.Namespace, "namespace", "n", "", "namespace to use")
 	f.StringVar(&Flags.Kubeconfig, "kubeconfig", "", "path to kubeconfig file")
-	f.StringVar(&Flags.AIProvider, "ai", "", "AI provider: claude|gemini (auto-detect by default)")
+	f.StringVar(&Flags.AIProvider, "ai", "", "AI provider: claude|antigravity (auto-detect by default)")
 	f.BoolVar(&Flags.Yes, "yes", false, "skip confirmation prompts (use with care)")
 	f.StringVar(&Flags.DryRun, "dry-run", "auto", "dry-run mode: auto|server|client|none")
 	f.BoolVar(&Flags.Plain, "plain", false, "disable color/TUI output")
 	f.BoolVarP(&Flags.Verbose, "verbose", "v", false, "verbose output")
 	f.StringVar(&Flags.Audit, "audit", "on", "audit logging: on|off")
 	f.BoolVar(&Flags.NoContext, "no-context", false, "for AI: send only the literal prompt, no cluster data")
+	f.BoolVar(&Flags.Tools, "tools", false, "for AI: let the provider run read-only kubectl to investigate (claude-enforced; antigravity best-effort)")
+	f.DurationVar(&Flags.AITimeout, "ai-timeout", 0, "for AI: max time to wait for a response (default 90s, 5m with --tools)")
 
 	root.PersistentPreRunE = persistentPreRunE
 	root.PersistentPostRunE = persistentPostRunE

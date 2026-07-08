@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -36,13 +35,18 @@ redaction is best-effort. Use --no-context if you don't want the data sent.`,
 }
 
 func runDiagnose(cmd *cobra.Command, args []string) error {
-	return runAIDiagnostic(cmd, args[0], "diagnose")
+	// diagnose is open-ended, so it enriches with owner chain + siblings and can
+	// opt into read-only tool access via --tools.
+	return runAIDiagnostic(cmd, args[0], "diagnose", true, Flags.Tools)
 }
 
 // runAIDiagnostic is the shared body for `sk diagnose` and `sk why`: same data
 // gathering, same provider invocation, different prompt template. The template
-// name selects which set of instructions the model receives.
-func runAIDiagnostic(cmd *cobra.Command, resource, templateName string) error {
+// name selects which set of instructions the model receives. enrichPod controls
+// whether we fetch the owner chain + sibling pods (diagnose uses them; the why
+// template does not). allowTools opts the run into read-only kubectl tool
+// access (claude-enforced; antigravity best-effort).
+func runAIDiagnostic(cmd *cobra.Command, resource, templateName string, enrichPod, allowTools bool) error {
 	resourceType, resourceName := splitResource(resource)
 	if resourceName == "" {
 		return errors.New(templateName + ": expected TYPE/NAME (e.g. pod/foo)")
@@ -59,10 +63,11 @@ func runAIDiagnostic(cmd *cobra.Command, resource, templateName string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), resolveAITimeout(allowTools))
 	defer cancel()
 
-	inputs := gatherDiagnostic(ctx, runner, resource, resourceType, resourceName)
+	inputs := gatherDiagnostic(ctx, runner, resource, resourceType, resourceName, enrichPod)
+	inputs.ToolsAllowed = allowTools
 
 	prompt, err := ai.Render(templateName, inputs)
 	if err != nil {
@@ -71,7 +76,7 @@ func runAIDiagnostic(cmd *cobra.Command, resource, templateName string) error {
 
 	w, stopSpinner := ui.SpinUntilFirstByte("asking "+provider.Name()+"…", os.Stdout)
 	defer stopSpinner()
-	if err := provider.Run(ctx, prompt, w, ai.RunOpts{}); err != nil {
+	if err := provider.Run(ctx, prompt, w, ai.RunOpts{AllowReadOnlyKubectl: allowTools}); err != nil {
 		return fmt.Errorf("%s: %w", provider.Name(), err)
 	}
 	fmt.Fprintln(os.Stdout)
@@ -83,24 +88,31 @@ func runAIDiagnostic(cmd *cobra.Command, resource, templateName string) error {
 // available yet (very fresh pod), we keep going with the rest. The current
 // namespace from --namespace is honored; without it kubectl uses the context's
 // default.
-func gatherDiagnostic(ctx context.Context, runner *kubectl.Runner, resource, resourceType, resourceName string) ai.PromptInputs {
-	return gatherDiagnosticNS(ctx, runner, resource, resourceType, resourceName, Flags.Namespace)
+func gatherDiagnostic(ctx context.Context, runner *kubectl.Runner, resource, resourceType, resourceName string, enrichPod bool) ai.PromptInputs {
+	return gatherDiagnosticNS(ctx, runner, resource, resourceType, resourceName, Flags.Namespace, enrichPod)
 }
 
 // gatherDiagnosticNS is the same as gatherDiagnostic but lets the caller pin
 // the namespace explicitly. The TUI uses this so each action runs against the
 // selected pod's actual namespace rather than --namespace.
-func gatherDiagnosticNS(ctx context.Context, runner *kubectl.Runner, resource, resourceType, resourceName, namespace string) ai.PromptInputs {
+//
+// --no-context is honored strictly: when set, we send NO cluster data at all
+// (no describe/events/logs, no owner chain, no siblings) — only the resource
+// reference — matching the flag's documented "literal prompt only" promise.
+func gatherDiagnosticNS(ctx context.Context, runner *kubectl.Runner, resource, resourceType, resourceName, namespace string, enrichPod bool) ai.PromptInputs {
 	inputs := ai.PromptInputs{Resource: resource}
-	if !Flags.NoContext {
-		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: Flags.Context}
-		inputs.Context, _ = loader.CurrentContext()
-		if namespace != "" {
-			inputs.Namespace = namespace
-		} else {
-			inputs.Namespace, _ = loader.CurrentNamespace()
-		}
+	if Flags.NoContext {
+		return inputs
 	}
+
+	loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: Flags.Context}
+	if namespace != "" {
+		inputs.Context, _, _ = loader.CurrentContextAndNamespace()
+		inputs.Namespace = namespace
+	} else {
+		inputs.Context, inputs.Namespace, _ = loader.CurrentContextAndNamespace()
+	}
+
 	withNS := func(parts ...string) []string {
 		if namespace == "" {
 			return parts
@@ -121,15 +133,14 @@ func gatherDiagnosticNS(ctx context.Context, runner *kubectl.Runner, resource, r
 
 	// Owner chain + sibling pods enrich the prompt for pod targets. Best-effort:
 	// errors are swallowed because we'd rather render a partial diagnose than
-	// fail on a missing RBAC permission.
-	if isPodKind(resourceType) && !Flags.NoContext {
+	// fail on a missing RBAC permission. Skipped when enrichPod is false (e.g.
+	// `sk why`, whose template renders neither) to avoid the API round-trips.
+	if enrichPod && isPodKind(resourceType) {
 		ns := inputs.Namespace
 		if ns == "" {
 			ns = "default"
 		}
-		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig, Context: Flags.Context}
-		inputs.OwnerChain, _ = loader.OwnerChain(ctx, ns, resourceName)
-		inputs.SiblingPods, _ = loader.SiblingPods(ctx, ns, resourceName)
+		inputs.OwnerChain, inputs.SiblingPods, _ = loader.EnrichPod(ctx, ns, resourceName)
 	}
 	return inputs
 }
@@ -153,15 +164,6 @@ func splitResource(s string) (kind, name string) {
 		return s[:idx], s[idx+1:]
 	}
 	return "pod", s
-}
-
-// kubectlNSArgs builds a kubectl argv that respects the user's --namespace
-// flag (if set) without adding it twice.
-func kubectlNSArgs(parts ...string) []string {
-	if Flags.Namespace == "" {
-		return parts
-	}
-	return append(parts, "-n", Flags.Namespace)
 }
 
 func captureKubectl(ctx context.Context, runner *kubectl.Runner, args []string) (string, error) {

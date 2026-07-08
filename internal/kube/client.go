@@ -91,16 +91,38 @@ func (l Loader) CurrentNamespace() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	name := l.Context
+	return namespaceFromRaw(raw, l.Context), nil
+}
+
+// CurrentContextAndNamespace returns both the active context name and its
+// namespace from a single kubeconfig parse. Callers that need both (the AI
+// commands attaching light context) should prefer this over calling
+// CurrentContext + CurrentNamespace, which would parse the kubeconfig twice.
+func (l Loader) CurrentContextAndNamespace() (contextName, namespace string, err error) {
+	raw, _, err := l.Raw()
+	if err != nil {
+		return "", "", err
+	}
+	contextName = l.Context
+	if contextName == "" {
+		contextName = raw.CurrentContext
+	}
+	if contextName == "" {
+		return "", "", errors.New("no current-context set in kubeconfig")
+	}
+	return contextName, namespaceFromRaw(raw, l.Context), nil
+}
+
+// namespaceFromRaw resolves the namespace for contextOverride (or the config's
+// current-context when empty), defaulting to "default".
+func namespaceFromRaw(raw api.Config, contextOverride string) string {
+	name := contextOverride
 	if name == "" {
 		name = raw.CurrentContext
 	}
 	ctx, ok := raw.Contexts[name]
-	if !ok || ctx == nil {
-		return "default", nil
+	if !ok || ctx == nil || ctx.Namespace == "" {
+		return "default"
 	}
-	if ctx.Namespace == "" {
-		return "default", nil
-	}
-	return ctx.Namespace, nil
+	return ctx.Namespace
 }

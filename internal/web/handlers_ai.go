@@ -13,7 +13,8 @@ import (
 // apiAIExplain streams a free-form AI answer over SSE. Mirrors `sk ai
 // explain <question>` — context attachment is opt-in via with_context, and
 // the caller may also opt into read-only kubectl/sk tool access via
-// allow_read_only (claude only; gemini falls back to prompt-only constraint).
+// allow_read_only (claude only; antigravity falls back to prompt-only
+// constraint).
 func (s *Server) apiAIExplain(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Question      string `json:"question"`
@@ -26,7 +27,7 @@ func (s *Server) apiAIExplain(w http.ResponseWriter, r *http.Request) {
 	}
 	provider, err := s.deps.AIProvider()
 	if err != nil || provider == nil {
-		http.Error(w, "no AI provider available (install claude or gemini)", http.StatusServiceUnavailable)
+		http.Error(w, "no AI provider available (install claude or agy)", http.StatusServiceUnavailable)
 		return
 	}
 	sess := s.readSession(r)
@@ -139,9 +140,8 @@ func (s *Server) runDiagnose(w http.ResponseWriter, r *http.Request, tmpl string
 	}
 	ownerChain, sibling := "", ""
 	if body.Kind == "pod" {
-		l := s.loader(sess)
-		ownerChain, _ = l.OwnerChain(r.Context(), body.Namespace, body.Name)
-		sibling, _ = l.SiblingPods(r.Context(), body.Namespace, body.Name)
+		// One clientset + one pod GET for both owner chain and siblings.
+		ownerChain, sibling, _ = s.loader(sess).EnrichPod(r.Context(), body.Namespace, body.Name)
 	}
 
 	prompt, err := ai.Render(tmpl, ai.PromptInputs{

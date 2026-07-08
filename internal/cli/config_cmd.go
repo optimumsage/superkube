@@ -65,10 +65,10 @@ func newConfigInitCmd() *cobra.Command {
 const defaultConfigYAML = `# superkube configuration
 # Most settings can also be overridden via flags or environment variables.
 
-# AI provider preference. Leave blank to auto-detect (claude > gemini).
+# AI provider preference. Leave blank to auto-detect (claude > antigravity).
 # ai:
-#   provider: claude        # claude | gemini
-#   timeout: 90s
+#   provider: claude        # claude | antigravity
+#   timeout: 90s            # also settable per-run via --ai-timeout
 
 # Audit logging. Disable with --audit=off on the command line.
 # audit:
