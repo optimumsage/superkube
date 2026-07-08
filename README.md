@@ -163,6 +163,8 @@ AI commands run your **local** `claude` or `agy` (Antigravity) CLI under your ac
 
 Redaction is **best-effort, not security**. If your prompt contains free-form pasted output, review before sending. Use `--no-context` to send the literal prompt with no cluster data attached at all.
 
+**Terminal rendering.** On a TTY, the model's markdown response is styled as it streams — headings and `**bold**` are emphasized, `` `code` `` and bullet lists are colored, and fenced code blocks are dimmed. Piped, redirected, `--plain`, or `NO_COLOR` output stays raw markdown so scripts and `jq` see exactly what the model produced.
+
 ### Pretty `get`, `describe`, `logs`
 
 On a TTY, the three most-used read commands are styled inline by superkube — no flags to flip, no formatters to install.

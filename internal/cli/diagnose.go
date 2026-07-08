@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -13,7 +11,6 @@ import (
 	"github.com/optimumsage/superkube/internal/ai"
 	"github.com/optimumsage/superkube/internal/kube"
 	"github.com/optimumsage/superkube/internal/kubectl"
-	"github.com/optimumsage/superkube/internal/ui"
 )
 
 func newDiagnoseCmd() *cobra.Command {
@@ -74,13 +71,7 @@ func runAIDiagnostic(cmd *cobra.Command, resource, templateName string, enrichPo
 		return err
 	}
 
-	w, stopSpinner := ui.SpinUntilFirstByte("asking "+provider.Name()+"…", os.Stdout)
-	defer stopSpinner()
-	if err := provider.Run(ctx, prompt, w, ai.RunOpts{AllowReadOnlyKubectl: allowTools}); err != nil {
-		return fmt.Errorf("%s: %w", provider.Name(), err)
-	}
-	fmt.Fprintln(os.Stdout)
-	return nil
+	return streamAIResponse(ctx, provider, prompt, ai.RunOpts{AllowReadOnlyKubectl: allowTools})
 }
 
 // gatherDiagnostic shells out to kubectl to collect the describe/events/logs

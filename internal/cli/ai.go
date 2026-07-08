@@ -3,15 +3,12 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/optimumsage/superkube/internal/ai"
 	"github.com/optimumsage/superkube/internal/kube"
-	"github.com/optimumsage/superkube/internal/ui"
 )
 
 func newAICmd() *cobra.Command {
@@ -68,11 +65,5 @@ func runAIExplain(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), resolveAITimeout(Flags.Tools))
 	defer cancel()
 
-	w, stopSpinner := ui.SpinUntilFirstByte("asking "+provider.Name()+"…", os.Stdout)
-	defer stopSpinner()
-	if err := provider.Run(ctx, prompt, w, ai.RunOpts{AllowReadOnlyKubectl: Flags.Tools}); err != nil {
-		return fmt.Errorf("%s: %w", provider.Name(), err)
-	}
-	fmt.Fprintln(os.Stdout)
-	return nil
+	return streamAIResponse(ctx, provider, prompt, ai.RunOpts{AllowReadOnlyKubectl: Flags.Tools})
 }

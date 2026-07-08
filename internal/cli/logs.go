@@ -142,13 +142,7 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	w, stop := ui.SpinUntilFirstByte("asking "+provider.Name()+"…", os.Stdout)
-	defer stop()
-	if err := provider.Run(ctx, prompt, w, ai.RunOpts{}); err != nil {
-		return fmt.Errorf("%s: %w", provider.Name(), err)
-	}
-	fmt.Fprintln(os.Stdout)
-	return nil
+	return streamAIResponse(ctx, provider, prompt, ai.RunOpts{})
 }
 
 // runLogsMulti drives a multi-pod tail via client-go. target is either a

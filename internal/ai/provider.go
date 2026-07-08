@@ -6,8 +6,10 @@
 //     AI-flavored command (`sk ai`, `sk diagnose`, `sk why`, `sk logs --ai`).
 //   - We redact obvious credential-shaped data from the prompt before
 //     spawning the child process.
-//   - Output is streamed unchanged so the user sees exactly what the model
-//     produced; we don't reformat or summarize.
+//   - Output is streamed as the model produces it; we never reword or
+//     summarize it. On a TTY the caller applies light markdown styling
+//     (ui.MarkdownWriter) for readability, but piped/`--plain` output stays
+//     raw so scripts see exactly what the model emitted.
 package ai
 
 import (
