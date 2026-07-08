@@ -29,6 +29,7 @@ func download(ctx context.Context, h httpDoer, url, dest string) error {
 	if err != nil {
 		return err
 	}
+	applyGitHubHeaders(req, false)
 	resp, err := client(h).Do(req)
 	if err != nil {
 		return err
@@ -57,6 +58,7 @@ func verifyAgainstChecksumsURL(ctx context.Context, h httpDoer, url, file, asset
 	if err != nil {
 		return err
 	}
+	applyGitHubHeaders(req, false)
 	resp, err := client(h).Do(req)
 	if err != nil {
 		return err

@@ -36,23 +36,30 @@ func TestAssetURLAndChecksumURL(t *testing.T) {
 // first matching URL prefix. The test sets routes to whatever the code under
 // test should see.
 type fakeDoer struct {
-	routes map[string]fakeResponse
-	calls  []string
+	routes  map[string]fakeResponse
+	calls   []string
+	lastReq *http.Request // captured so tests can assert request headers
 }
 
 type fakeResponse struct {
 	status int
 	body   string
+	header http.Header // optional response headers (e.g. rate-limit)
 }
 
 func (f *fakeDoer) Do(req *http.Request) (*http.Response, error) {
 	f.calls = append(f.calls, req.URL.String())
+	f.lastReq = req
 	for prefix, resp := range f.routes {
 		if strings.HasPrefix(req.URL.String(), prefix) {
+			hdr := resp.header
+			if hdr == nil {
+				hdr = make(http.Header)
+			}
 			return &http.Response{
 				StatusCode: resp.status,
 				Body:       io.NopCloser(strings.NewReader(resp.body)),
-				Header:     make(http.Header),
+				Header:     hdr,
 			}, nil
 		}
 	}
@@ -94,6 +101,72 @@ func TestLatestRelease_MissingTag(t *testing.T) {
 	}}
 	if _, err := latestRelease(context.Background(), f, "foo/bar"); err == nil {
 		t.Error("expected error when tag_name absent")
+	}
+}
+
+func TestLatestReleaseSetsHeaders(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok123")
+	t.Setenv("GH_TOKEN", "")
+	f := &fakeDoer{routes: map[string]fakeResponse{
+		"https://api.github.com/repos/foo/bar/releases/latest": {status: 200, body: `{"tag_name":"v1.0.0"}`},
+	}}
+	if _, err := latestRelease(context.Background(), f, "foo/bar"); err != nil {
+		t.Fatalf("latestRelease err: %v", err)
+	}
+	if ua := f.lastReq.Header.Get("User-Agent"); !strings.HasPrefix(ua, "superkube/") {
+		t.Errorf("User-Agent = %q, want superkube/…", ua)
+	}
+	if f.lastReq.Header.Get("Accept") == "" {
+		t.Error("Accept header not set on API request")
+	}
+	if got := f.lastReq.Header.Get("Authorization"); got != "Bearer tok123" {
+		t.Errorf("Authorization = %q, want Bearer tok123", got)
+	}
+}
+
+func TestLatestReleaseNoTokenNoAuthHeader(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	f := &fakeDoer{routes: map[string]fakeResponse{
+		"https://api.github.com/repos/foo/bar/releases/latest": {status: 200, body: `{"tag_name":"v1.0.0"}`},
+	}}
+	if _, err := latestRelease(context.Background(), f, "foo/bar"); err != nil {
+		t.Fatalf("latestRelease err: %v", err)
+	}
+	if got := f.lastReq.Header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization should be absent without a token, got %q", got)
+	}
+}
+
+func TestLatestReleaseRateLimited(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	h := http.Header{}
+	h.Set("X-RateLimit-Remaining", "0")
+	h.Set("X-RateLimit-Reset", "9999999999") // far future → message includes reset
+	f := &fakeDoer{routes: map[string]fakeResponse{
+		"https://api.github.com/repos/foo/bar/releases/latest": {status: 403, header: h},
+	}}
+	_, err := latestRelease(context.Background(), f, "foo/bar")
+	if err == nil || !strings.Contains(err.Error(), "rate limit") {
+		t.Fatalf("expected a rate-limit error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "GITHUB_TOKEN") {
+		t.Errorf("rate-limit error should hint at GITHUB_TOKEN, got %q", err)
+	}
+}
+
+func TestLatestRelease403NotRateLimit(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	// A 403 without the rate-limit marker should fall through to the generic
+	// message, not be misreported as a rate limit.
+	f := &fakeDoer{routes: map[string]fakeResponse{
+		"https://api.github.com/repos/foo/bar/releases/latest": {status: 403},
+	}}
+	_, err := latestRelease(context.Background(), f, "foo/bar")
+	if err == nil || strings.Contains(err.Error(), "rate limit") {
+		t.Fatalf("plain 403 should not be a rate-limit error, got %v", err)
 	}
 }
 

@@ -6,8 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/optimumsage/superkube/internal/version"
 )
 
 // httpDoer is the minimal subset of *http.Client we consume. Defined as an
@@ -28,6 +32,67 @@ func client(h httpDoer) httpDoer {
 	return defaultHTTPClient
 }
 
+// userAgent identifies superkube to GitHub. GitHub's API requires a User-Agent
+// header and its abuse detection is friendlier to a descriptive one than to the
+// generic Go default.
+func userAgent() string {
+	v := version.Version
+	if v == "" {
+		v = "dev"
+	}
+	return "superkube/" + v
+}
+
+// githubToken returns a personal-access / CI token from the environment, if
+// present. Sending it lifts the rate limit from 60 to 5000 requests/hour. This
+// is best-effort: unauthenticated upgrades keep working (until the 60/hr limit
+// is hit). Note that `sudo` strips the environment, so under sudo the token
+// must be passed explicitly (e.g. `sudo GITHUB_TOKEN=… sk upgrade`).
+func githubToken() string {
+	if t := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); t != "" {
+		return t
+	}
+	return strings.TrimSpace(os.Getenv("GH_TOKEN"))
+}
+
+// applyGitHubHeaders sets the headers every GitHub request should carry. The
+// api flag adds the REST-only Accept + API-version headers; release-asset
+// downloads on github.com don't need them. Go strips the Authorization header
+// on cross-host redirects, so it's safe to attach even for download URLs that
+// redirect to a CDN.
+func applyGitHubHeaders(req *http.Request, api bool) {
+	req.Header.Set("User-Agent", userAgent())
+	if api {
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	}
+	if tok := githubToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+}
+
+// rateLimitError returns a helpful error when resp is a GitHub rate-limit
+// rejection (403/429 with X-RateLimit-Remaining: 0), or nil otherwise. The
+// unauthenticated limit is 60 req/hr per IP — easy to hit behind shared NAT or
+// on repeated runs — so we point the user at GITHUB_TOKEN and the reset time.
+func rateLimitError(resp *http.Response) error {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	if resp.Header.Get("X-RateLimit-Remaining") != "0" {
+		return nil
+	}
+	const hint = "set GITHUB_TOKEN (or GH_TOKEN) to raise it to 5000/hr (under sudo: `sudo GITHUB_TOKEN=… sk upgrade`)"
+	if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+		if secs, perr := strconv.ParseInt(reset, 10, 64); perr == nil {
+			if d := time.Until(time.Unix(secs, 0)); d > 0 {
+				return fmt.Errorf("github API rate limit exceeded (60 req/hr unauthenticated); resets in ~%s — %s", d.Round(time.Minute), hint)
+			}
+		}
+	}
+	return fmt.Errorf("github API rate limit exceeded (60 req/hr unauthenticated) — %s", hint)
+}
+
 // latestRelease asks the GitHub REST API for the most recent release tag.
 // We match install.sh: GET /repos/<repo>/releases/latest, read tag_name.
 func latestRelease(ctx context.Context, h httpDoer, repo string) (string, error) {
@@ -36,13 +101,16 @@ func latestRelease(ctx context.Context, h httpDoer, repo string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	applyGitHubHeaders(req, true)
 	resp, err := client(h).Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer drainAndClose(resp.Body)
 	if resp.StatusCode != http.StatusOK {
+		if rlErr := rateLimitError(resp); rlErr != nil {
+			return "", rlErr
+		}
 		return "", fmt.Errorf("github API returned %s", resp.Status)
 	}
 	var body struct {
