@@ -29,12 +29,13 @@ type hardenEnv struct {
 }
 
 type hardenOpts struct {
-	policy   func(ctx string) (guardrail.Policy, error)
-	yes      bool
-	token    string
-	bind     string
-	startCtx string
-	noRunner bool
+	policy     func(ctx string) (guardrail.Policy, error)
+	yes        bool
+	token      string
+	bind       string
+	startCtx   string
+	noRunner   bool
+	kubeconfig string
 }
 
 func newHardenEnv(t *testing.T, o hardenOpts) *hardenEnv {
@@ -47,10 +48,15 @@ func newHardenEnv(t *testing.T, o hardenOpts) *hardenEnv {
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	kc := o.kubeconfig
+	if kc == "" {
+		kc = filepath.Join(dir, "no-kubeconfig") // hermetic: never read the host kubeconfig
+	}
 	e := &hardenEnv{log: logPath}
 	deps := Deps{
-		Loader:    kube.Loader{Context: o.startCtx},
-		PolicyFor: o.policy,
+		Loader:     kube.Loader{Context: o.startCtx, KubeconfigPath: kc},
+		Kubeconfig: kc,
+		PolicyFor:  o.policy,
 		Audit: func(ev audit.Event) {
 			e.mu.Lock()
 			e.events = append(e.events, ev)
