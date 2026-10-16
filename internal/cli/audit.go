@@ -103,7 +103,7 @@ func runAuditLog(cmd *cobra.Command, f auditFilters, follow, raw bool) error {
 		return err
 	}
 	if file != nil {
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 	}
 
 	if len(entries) == 0 && !follow {
@@ -124,7 +124,7 @@ func runAuditLog(cmd *cobra.Command, f auditFilters, follow, raw bool) error {
 	if !follow {
 		return nil
 	}
-	return followAuditLog(cmd, f, raw, pretty, file, pos)
+	return followAuditLog(cmd, f, pretty, file, pos)
 }
 
 func runAuditStats(cmd *cobra.Command, f auditFilters) error {
@@ -244,7 +244,7 @@ func matchAuditFilters(e audit.Event, f auditFilters, cutoff time.Time) bool {
 // followAuditLog is the streaming counterpart: every 500ms it re-stats the
 // file and renders any new matching lines. Best-effort across rotation (we
 // just keep reading whatever the open fd points at).
-func followAuditLog(cmd *cobra.Command, f auditFilters, raw, pretty bool, file *os.File, pos int64) error {
+func followAuditLog(cmd *cobra.Command, f auditFilters, pretty bool, file *os.File, pos int64) error {
 	if file == nil {
 		// Log file didn't exist when we started. Try again periodically.
 		for {
@@ -256,7 +256,7 @@ func followAuditLog(cmd *cobra.Command, f auditFilters, raw, pretty bool, file *
 			ff, err := os.Open(audit.LogPath())
 			if err == nil {
 				file = ff
-				defer file.Close()
+				defer func() { _ = file.Close() }()
 				break
 			}
 		}

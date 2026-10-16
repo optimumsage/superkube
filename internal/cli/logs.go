@@ -194,7 +194,7 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 	var out io.Writer = os.Stdout
 	if ui.Styled() {
 		lc := newLineColorizer(os.Stdout)
-		defer lc.Flush()
+		defer func() { _ = lc.Flush() }() // best-effort: stdout is the only sink
 		out = lc
 	}
 	return loader.TailMulti(cmd.Context(), opts, out, prefixer)

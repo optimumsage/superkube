@@ -28,13 +28,12 @@ func (s *Server) apiConfigGet(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// parseConfig validates config.yaml text strictly: unknown keys and wrong types
-// are errors, so a typo in a `forbid:` section is rejected instead of silently
-// dropping the rule.
-// TODO(integration): config.Parse
+// parseConfig validates config.yaml text exactly as the CLI loads it (strict
+// keys and types plus semantic validation), so the browser can never save a
+// file that would make every guarded CLI command fail closed.
 func parseConfig(data []byte) error {
-	var probe config.Config
-	return yaml.UnmarshalStrict(data, &probe)
+	_, err := config.Parse(data)
+	return err
 }
 
 // configChangeSummary names the top-level keys whose value differs between the

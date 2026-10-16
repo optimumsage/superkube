@@ -82,7 +82,9 @@ func TestLineColorizerFlushResidual(t *testing.T) {
 	if buf.Len() != 0 {
 		t.Errorf("expected nothing flushed yet, got %q", buf.String())
 	}
-	lc.Flush()
+	if err := lc.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(buf.String(), "trailing without newline") {
 		t.Errorf("Flush() did not emit residue, got %q", buf.String())
 	}
