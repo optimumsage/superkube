@@ -2,16 +2,14 @@ package cli
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
-	"sigs.k8s.io/yaml"
 
 	"github.com/optimumsage/superkube/internal/kubectl"
+	"github.com/optimumsage/superkube/internal/secretyaml"
 	"github.com/optimumsage/superkube/internal/ui"
 )
 
@@ -89,107 +87,12 @@ func runSecretView(cmd *cobra.Command, args []string) error {
 
 	out := stdout.String()
 	if reveal {
-		out = revealSecretYAML(out)
+		out = secretyaml.Reveal(out)
 	} else {
-		out = maskSecretYAML(out)
+		out = secretyaml.Mask(out)
 	}
 	_, _ = fmt.Fprint(cmd.OutOrStdout(), out)
 	return nil
-}
-
-const (
-	secretMaskPlaceholder  = "<base64 hidden — pass --reveal to decode>"
-	lastAppliedAnnotation  = "kubectl.kubernetes.io/last-applied-configuration"
-	lastAppliedPlaceholder = "<hidden: last-applied-configuration embeds the Secret's data>"
-	secretParseFailed      = "# secret view: could not parse kubectl output; refusing to print it unmasked\n"
-)
-
-// maskSecretYAML replaces every value under `data:`, `binaryData:` and
-// `stringData:` with a masking placeholder, for a single Secret or for each
-// item of a List (`sk secret view a b`, `-l ...`). The YAML is parsed
-// structurally rather than line-matched so nested/indented items can't slip
-// through. Output keys are re-sorted by the marshaller; values are never kept.
-// If the input can't be parsed we fail closed rather than echo it.
-func maskSecretYAML(raw string) string {
-	return transformSecretYAML(raw, func(string) string { return secretMaskPlaceholder }, true)
-}
-
-// revealSecretYAML base64-decodes each value in `data:`/`binaryData:` (for a
-// single Secret or every List item). Values that fail to decode are replaced
-// with `<invalid-base64>`. `stringData` is already plaintext and is left as is.
-// The last-applied-configuration annotation is still hidden: it duplicates the
-// data and would otherwise show the base64 form alongside the decoded one.
-func revealSecretYAML(raw string) string {
-	return transformSecretYAML(raw, func(v string) string {
-		if v == "" {
-			return ""
-		}
-		dec, err := base64.StdEncoding.DecodeString(v)
-		if err != nil {
-			return "<invalid-base64>"
-		}
-		return string(dec)
-	}, false)
-}
-
-// transformSecretYAML parses raw (YAML or JSON), applies fn to each
-// data/binaryData value (and, when maskStringData, replaces stringData values
-// with the mask), hides the last-applied annotation, and re-serialises.
-// Documents without any of those fields are returned unchanged.
-func transformSecretYAML(raw string, fn func(string) string, maskStringData bool) string {
-	var doc map[string]any
-	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil || doc == nil {
-		if strings.TrimSpace(raw) == "" {
-			return raw
-		}
-		return secretParseFailed
-	}
-	changed := transformSecretObject(doc, fn, maskStringData)
-	if items, ok := doc["items"].([]any); ok {
-		for _, it := range items {
-			if m, ok := it.(map[string]any); ok && transformSecretObject(m, fn, maskStringData) {
-				changed = true
-			}
-		}
-	}
-	if !changed {
-		return raw
-	}
-	out, err := yaml.Marshal(doc)
-	if err != nil {
-		return secretParseFailed
-	}
-	return string(out)
-}
-
-func transformSecretObject(obj map[string]any, fn func(string) string, maskStringData bool) bool {
-	changed := false
-	for _, field := range []string{"data", "binaryData"} {
-		if m, ok := obj[field].(map[string]any); ok {
-			for k, v := range m {
-				str, _ := v.(string)
-				m[k] = fn(strings.TrimSpace(str))
-				changed = true
-			}
-		}
-	}
-	if maskStringData {
-		if m, ok := obj["stringData"].(map[string]any); ok {
-			for k := range m {
-				m[k] = secretMaskPlaceholder
-				changed = true
-			}
-		}
-	}
-	if md, ok := obj["metadata"].(map[string]any); ok {
-		if ann, ok := md["annotations"].(map[string]any); ok {
-			if _, ok := ann[lastAppliedAnnotation]; ok {
-				ann[lastAppliedAnnotation] = lastAppliedPlaceholder
-				changed = true
-			}
-		}
-	}
-	return changed
 }
 
 const secretViewLongHelp = `Show a Secret as YAML.
@@ -209,3 +112,6 @@ Wraps ` + "`kubectl edit secret NAME`" + `, which keeps values base64-encoded
 in the buffer. To edit a decoded value, base64-decode before editing and
 re-encode before saving (or use a stringData entry, which kubectl encodes
 for you on apply). Forbid-policy contexts block edit just like ` + "`delete`" + `.`
+
+// maskSecretYAML is kept for tui.go; the logic lives in internal/secretyaml.
+func maskSecretYAML(raw string) string { return secretyaml.Mask(raw) }
