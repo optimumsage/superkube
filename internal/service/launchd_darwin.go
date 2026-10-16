@@ -50,7 +50,7 @@ func (m launchdManager) Install(spec Spec, force bool) error {
 	if err != nil {
 		return fmt.Errorf("render plist: %w", err)
 	}
-	if err := os.WriteFile(plistPath, body, 0o644); err != nil {
+	if err := writeUnitFile(plistPath, body); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
 	if err := launchctlLoad(plistPath); err != nil {

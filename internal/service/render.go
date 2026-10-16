@@ -100,7 +100,7 @@ func RenderSystemdUnit(spec Spec) ([]byte, error) {
 	b.WriteString("Restart=on-failure\n")
 	b.WriteString("RestartSec=2\n")
 	for _, k := range sortedKeys(spec.Env) {
-		fmt.Fprintf(&b, "Environment=%s=%s\n", k, spec.Env[k])
+		fmt.Fprintf(&b, "Environment=%s\n", quoteSystemdEnv(k, spec.Env[k]))
 	}
 	b.WriteString("\n[Install]\n")
 	b.WriteString("WantedBy=default.target\n")
@@ -125,6 +125,21 @@ func quoteSystemd(s string) string {
 	}
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return `"` + r.Replace(s) + `"`
+}
+
+// quoteSystemdEnv renders one Environment= assignment per systemd.exec(5):
+// an assignment containing whitespace or quote/backslash characters must be
+// wrapped in double quotes (with \ and " escaped), and a literal % must be
+// doubled because unit files expand %-specifiers. Plain values stay bare so
+// the common case reads naturally.
+func quoteSystemdEnv(k, v string) string {
+	v = strings.ReplaceAll(v, "\n", " ")
+	assign := k + "=" + strings.ReplaceAll(v, "%", "%%")
+	if !strings.ContainsAny(assign, " \t\"'\\") {
+		return assign
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return `"` + r.Replace(assign) + `"`
 }
 
 func sortedKeys(m map[string]string) []string {
