@@ -2,6 +2,9 @@ package web
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -164,6 +167,30 @@ func TestPassthroughRejectsServerLocalFileFlags(t *testing.T) {
 	for _, argv := range []string{`["get","pods","-lapp=web"]`, `["get","pods","-nfoo"]`, `["get","pods","-owide"]`} {
 		if rr := e.do(t, "/api/v1/passthrough", `{"argv":`+argv+`}`); rr.Code != http.StatusOK {
 			t.Errorf("%s: %d %s", argv, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestSessionCookiesAndSwitchBodiesValidated(t *testing.T) {
+	kc := filepath.Join(t.TempDir(), "kc")
+	cfg := "apiVersion: v1\nkind: Config\ncurrent-context: dev\nclusters:\n- name: c\n  cluster: {server: \"https://127.0.0.1:1\"}\nusers:\n- name: u\n  user: {token: x}\ncontexts:\n- name: dev\n  context: {cluster: c, user: u}\n"
+	if err := os.WriteFile(kc, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := newHardenEnv(t, hardenOpts{startCtx: "dev", kubeconfig: kc})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: sessCtxCookie, Value: "--server=x"})
+	req.AddCookie(&http.Cookie{Name: sessNsCookie, Value: "-A"})
+	sess := e.s.readSession(req)
+	if sess.Context != "dev" || sess.Namespace != "default" {
+		t.Fatalf("bad cookies must be ignored: %+v", sess)
+	}
+	if rr := e.do(t, "/api/v1/namespaces/switch", `{"namespace":"--all"}`); rr.Code != http.StatusBadRequest {
+		t.Errorf("ns switch: %d", rr.Code)
+	}
+	for _, b := range []string{`{"context":"--server=x"}`, `{"context":"nope"}`} {
+		if rr := e.do(t, "/api/v1/contexts/switch", b); rr.Code != http.StatusBadRequest && rr.Code != http.StatusNotFound {
+			t.Errorf("ctx switch %s: %d", b, rr.Code)
 		}
 	}
 }

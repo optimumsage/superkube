@@ -140,7 +140,7 @@ func (s *Server) apiContextSwitch(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if body.Context == "" {
+	if badToken(body.Context) {
 		s.render.Error(w, http.StatusBadRequest, "context required")
 		return
 	}
@@ -230,6 +230,12 @@ func (s *Server) apiNamespaceSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.decodeJSON(w, r, &body); err != nil {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	// Empty means "all namespaces" (clears the cookie); anything else must
+	// look like a name, never a flag.
+	if body.Namespace != "" && badToken(body.Namespace) {
+		s.render.Error(w, http.StatusBadRequest, "invalid namespace")
 		return
 	}
 	if body.Persist {

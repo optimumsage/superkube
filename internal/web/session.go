@@ -55,10 +55,10 @@ func (s *Server) resolveSession(r *http.Request) session {
 		Namespace:  s.deps.Namespace,
 		Kubeconfig: s.deps.Kubeconfig,
 	}
-	if c, err := r.Cookie(sessCtxCookie); err == nil && c.Value != "" {
+	if c, err := r.Cookie(sessCtxCookie); err == nil && c.Value != "" && !badToken(c.Value) {
 		sess.Context = c.Value
 	}
-	if c, err := r.Cookie(sessNsCookie); err == nil && c.Value != "" {
+	if c, err := r.Cookie(sessNsCookie); err == nil && c.Value != "" && !badToken(c.Value) {
 		sess.Namespace = c.Value
 	}
 	l := s.deps.Loader
