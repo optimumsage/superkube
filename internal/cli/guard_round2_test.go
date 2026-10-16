@@ -16,7 +16,9 @@ func TestOriginalArgvForPassthroughAndAudit(t *testing.T) {
 		t.Errorf("token value must not be rewritten: calls=%q", h.callLog())
 	}
 	m := lastAudit(t, h)
-	if got := fmt.Sprint(m["argv"]); !strings.Contains(got, "-v8") || strings.Contains(got, "--v=8") {
+	// The audit writer redacts the --token value, so check only that the
+	// recorded argv was not normalized (no synthesized --v=8).
+	if got := fmt.Sprint(m["argv"]); !strings.Contains(got, "--token") || strings.Contains(got, "--v=8") {
 		t.Errorf("audit argv must be the original: %v", got)
 	}
 

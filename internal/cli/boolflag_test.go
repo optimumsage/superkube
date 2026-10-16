@@ -19,9 +19,9 @@ func TestBoolFlag(t *testing.T) {
 		{[]string{"--all-containers=maybe", "--all-containers=true"}, false, true}, // every occurrence validated
 	}
 	for _, c := range cases {
-		got, err := boolFlag(c.args, "--all-containers")
+		got, err := strictBoolFlag(c.args, "--all-containers")
 		if (err != nil) != c.wantErr || got != c.want {
-			t.Errorf("boolFlag(%v) = %v, %v; want %v (err=%v)", c.args, got, err, c.want, c.wantErr)
+			t.Errorf("strictBoolFlag(%v) = %v, %v; want %v (err=%v)", c.args, got, err, c.want, c.wantErr)
 		}
 	}
 }

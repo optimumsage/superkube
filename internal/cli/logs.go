@@ -167,7 +167,7 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 		}
 	}
 
-	allContainers, err := boolFlag(args, "--all-containers")
+	allContainers, err := strictBoolFlag(args, "--all-containers")
 	if err != nil {
 		return err
 	}
@@ -200,11 +200,11 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 	return loader.TailMulti(cmd.Context(), opts, out, prefixer)
 }
 
-// boolFlag parses a kubectl-style boolean flag from args: absent is false, a
+// strictBoolFlag parses a kubectl-style boolean flag from args: absent is false, a
 // bare `--name` is true, and `--name=VALUE` must parse via strconv.ParseBool.
 // Like pflag, the last occurrence wins, and every occurrence is validated so a
 // typo earlier on the line isn't silently overridden.
-func boolFlag(args []string, name string) (bool, error) {
+func strictBoolFlag(args []string, name string) (bool, error) {
 	result := false
 	for _, a := range args {
 		if a == name {
