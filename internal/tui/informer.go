@@ -8,6 +8,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	apiwatch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -30,19 +32,39 @@ func StartInformers(ctx context.Context, cs kubernetes.Interface, ns string, sta
 		inf  cache.SharedIndexInformer
 		h    cache.ResourceEventHandlerFuncs
 	}
-	var errRV sync.Map // Kind -> resourceVersion at the last watch error
 	regs := []reg{
-		{KindPod, factory.Core().V1().Pods().Informer(), podHandlers(state)},
-		{KindConfigMap, factory.Core().V1().ConfigMaps().Informer(), configMapHandlers(state)},
-		{KindSecret, factory.Core().V1().Secrets().Informer(), secretHandlers(state)},
-		{KindIngress, factory.Networking().V1().Ingresses().Informer(), ingressHandlers(state)},
+		{KindPod, factory.InformerFor(&corev1.Pod{}, newInformerFunc(state, KindPod, &corev1.Pod{},
+			func(ctx context.Context, o metav1.ListOptions) (runtime.Object, error) {
+				return cs.CoreV1().Pods(ns).List(ctx, o)
+			},
+			func(ctx context.Context, o metav1.ListOptions) (apiwatch.Interface, error) {
+				return cs.CoreV1().Pods(ns).Watch(ctx, o)
+			})), podHandlers(state)},
+		{KindConfigMap, factory.InformerFor(&corev1.ConfigMap{}, newInformerFunc(state, KindConfigMap, &corev1.ConfigMap{},
+			func(ctx context.Context, o metav1.ListOptions) (runtime.Object, error) {
+				return cs.CoreV1().ConfigMaps(ns).List(ctx, o)
+			},
+			func(ctx context.Context, o metav1.ListOptions) (apiwatch.Interface, error) {
+				return cs.CoreV1().ConfigMaps(ns).Watch(ctx, o)
+			})), configMapHandlers(state)},
+		{KindSecret, factory.InformerFor(&corev1.Secret{}, newInformerFunc(state, KindSecret, &corev1.Secret{},
+			func(ctx context.Context, o metav1.ListOptions) (runtime.Object, error) {
+				return cs.CoreV1().Secrets(ns).List(ctx, o)
+			},
+			func(ctx context.Context, o metav1.ListOptions) (apiwatch.Interface, error) {
+				return cs.CoreV1().Secrets(ns).Watch(ctx, o)
+			})), secretHandlers(state)},
+		{KindIngress, factory.InformerFor(&networkingv1.Ingress{}, newInformerFunc(state, KindIngress, &networkingv1.Ingress{},
+			func(ctx context.Context, o metav1.ListOptions) (runtime.Object, error) {
+				return cs.NetworkingV1().Ingresses(ns).List(ctx, o)
+			},
+			func(ctx context.Context, o metav1.ListOptions) (apiwatch.Interface, error) {
+				return cs.NetworkingV1().Ingresses(ns).Watch(ctx, o)
+			})), ingressHandlers(state)},
 	}
 	for _, r := range regs {
-		kind, inf := r.kind, r.inf
+		kind := r.kind
 		if err := r.inf.SetWatchErrorHandlerWithContext(func(_ context.Context, _ *cache.Reflector, err error) {
-			// Remember the resourceVersion the failure happened at: a later,
-			// different one proves the list/watch is making progress again.
-			errRV.Store(kind, inf.LastSyncResourceVersion())
 			state.SetError(kind, err.Error())
 		}); err != nil {
 			return nil, err
@@ -80,30 +102,6 @@ func StartInformers(ctx context.Context, cs kubernetes.Interface, ns string, sta
 				state.SetSynced(kind)
 			}
 		}()
-		// Recovery watcher. Errors must clear on a successful relist/resync
-		// even for kinds with no objects (no events to piggyback on), but not
-		// merely because the first LIST finished: list can be allowed while
-		// watch is forbidden. So clear only once the informer's
-		// resourceVersion has moved past where the error occurred.
-		go func() {
-			tick := time.NewTicker(time.Second)
-			defer tick.Stop()
-			for {
-				select {
-				case <-stopCh:
-					return
-				case <-tick.C:
-				}
-				v, failed := errRV.Load(kind)
-				if !failed {
-					continue
-				}
-				if rv := inf.LastSyncResourceVersion(); rv != "" && rv != v.(string) {
-					errRV.Delete(kind)
-					state.ClearError(kind)
-				}
-			}
-		}()
 	}
 
 	go func() {
@@ -138,6 +136,34 @@ func stripSecretData(obj interface{}) (interface{}, error) {
 		}
 	}
 	return out, nil
+}
+
+// newInformerFunc builds an informer whose list/watch calls report success to
+// state. The recovery signal is a successful WATCH establishment: it proves the
+// connection works again regardless of whether the resourceVersion moved (it
+// doesn't on a quiet cluster), whereas a successful LIST alone proves nothing
+// about watch permission. The error generation is read before the call so a
+// failure recorded while the call was in flight is never erased by it.
+func newInformerFunc(
+	state *State, kind Kind, example runtime.Object,
+	list func(context.Context, metav1.ListOptions) (runtime.Object, error),
+	watch func(context.Context, metav1.ListOptions) (apiwatch.Interface, error),
+) func(kubernetes.Interface, time.Duration) cache.SharedIndexInformer {
+	return func(client kubernetes.Interface, resync time.Duration) cache.SharedIndexInformer {
+		lw := &cache.ListWatch{
+			ListWithContextFunc: list,
+			WatchFuncWithContext: func(ctx context.Context, o metav1.ListOptions) (apiwatch.Interface, error) {
+				gen := state.ErrGen(kind)
+				w, err := watch(ctx, o)
+				if err == nil {
+					state.ClearErrorIfGen(kind, gen)
+				}
+				return w, err
+			},
+		}
+		return cache.NewSharedIndexInformer(cache.ToListWatcherWithWatchListSemantics(lw, client), example, resync,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	}
 }
 
 func newFactory(cs kubernetes.Interface, ns string) informers.SharedInformerFactory {

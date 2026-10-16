@@ -14,6 +14,9 @@ func TestBoolFlag(t *testing.T) {
 		{[]string{"--all-containers=false"}, false, false},
 		{[]string{"--all-containers=0"}, false, false},
 		{[]string{"--all-containers=maybe"}, false, true},
+		{[]string{"--all-containers=true", "--all-containers=false"}, false, false}, // last wins
+		{[]string{"--all-containers=false", "--all-containers"}, true, false},
+		{[]string{"--all-containers=maybe", "--all-containers=true"}, false, true}, // every occurrence validated
 	}
 	for _, c := range cases {
 		got, err := boolFlag(c.args, "--all-containers")

@@ -179,6 +179,10 @@ type State struct {
 	byKind map[Kind]map[string]Row
 	synced map[Kind]bool
 	errs   map[Kind]string
+	// errGen counts SetError calls per kind. A success that wants to clear an
+	// error records the generation before it starts and clears only if no
+	// newer failure has been recorded since (ClearErrorIfGen).
+	errGen map[Kind]uint64
 }
 
 func NewState() *State {
@@ -186,6 +190,7 @@ func NewState() *State {
 		byKind: map[Kind]map[string]Row{},
 		synced: map[Kind]bool{},
 		errs:   map[Kind]string{},
+		errGen: map[Kind]uint64{},
 	}
 }
 
@@ -211,6 +216,27 @@ func (s *State) SetError(kind Kind, msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.errs[kind] = msg
+	s.errGen[kind]++
+}
+
+// ErrGen returns kind's current error generation.
+func (s *State) ErrGen(kind Kind) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.errGen[kind]
+}
+
+// ClearErrorIfGen clears kind's error only if no failure was recorded after
+// generation gen was read, so a late success can never erase a newer failure.
+// Record and clear share one mutex, which makes the check-and-clear atomic.
+func (s *State) ClearErrorIfGen(kind Kind, gen uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.errGen[kind] != gen {
+		return false
+	}
+	delete(s.errs, kind)
+	return true
 }
 
 // KindStatus reports whether kind has completed its initial sync and the

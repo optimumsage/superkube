@@ -62,8 +62,6 @@ func TestTailMultiFollowPendingThenRunning(t *testing.T) {
 
 // A transient open failure is retried; a claim is not leaked on final failure.
 func TestTailMultiRetriesTransientOpenFailure(t *testing.T) {
-	logOpenRetryDelay = time.Millisecond
-	defer func() { logOpenRetryDelay = time.Second }()
 	cs := fake.NewSimpleClientset(podWith("a", "main"))
 	var calls atomic.Int32
 	open := func(context.Context, string, string, *int64) (io.ReadCloser, error) {
@@ -73,7 +71,7 @@ func TestTailMultiRetriesTransientOpenFailure(t *testing.T) {
 		return io.NopCloser(strings.NewReader("hello\n")), nil
 	}
 	var buf bytes.Buffer
-	err := tailMultiWith(context.Background(), cs, MultiLogOpts{Namespace: "ns", Selector: "app=web"}, &buf, nil, open)
+	err := tailMultiWith(context.Background(), cs, MultiLogOpts{Namespace: "ns", Selector: "app=web", OpenRetryDelay: time.Millisecond}, &buf, nil, open)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,14 +81,12 @@ func TestTailMultiRetriesTransientOpenFailure(t *testing.T) {
 }
 
 func TestTailMultiOpenFailureReportedAfterRetries(t *testing.T) {
-	logOpenRetryDelay = time.Millisecond
-	defer func() { logOpenRetryDelay = time.Second }()
 	cs := fake.NewSimpleClientset(podWith("a", "main"))
 	open := func(context.Context, string, string, *int64) (io.ReadCloser, error) {
 		return nil, errors.New("boom")
 	}
 	var buf bytes.Buffer
-	_ = tailMultiWith(context.Background(), cs, MultiLogOpts{Namespace: "ns", Selector: "app=web"}, &buf, nil, open)
+	_ = tailMultiWith(context.Background(), cs, MultiLogOpts{Namespace: "ns", Selector: "app=web", OpenRetryDelay: time.Millisecond}, &buf, nil, open)
 	if !strings.Contains(buf.String(), "error opening log stream: boom") {
 		t.Fatalf("final failure not reported: %q", buf.String())
 	}

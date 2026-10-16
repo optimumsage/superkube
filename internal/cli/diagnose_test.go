@@ -42,7 +42,11 @@ func readCalls(t *testing.T, logPath string) []string {
 	if err != nil {
 		t.Fatalf("read call log: %v", err)
 	}
-	return strings.Split(strings.TrimSpace(string(b)), "\n")
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
 }
 
 // verbOf extracts the kubectl subcommand from a logged argv line, skipping the
@@ -55,6 +59,9 @@ func verbOf(line string) string {
 		case "--kubeconfig", "--context", "-n", "--namespace":
 			i++
 		default:
+			if strings.HasPrefix(f[i], "--kubeconfig=") || strings.HasPrefix(f[i], "--context=") || strings.HasPrefix(f[i], "--namespace=") {
+				continue
+			}
 			return f[i]
 		}
 	}
@@ -106,5 +113,19 @@ func TestGatherWithContextRunsThreeKubectlCalls(t *testing.T) {
 	}
 	if inputs.Describe == "" || inputs.Events == "" || inputs.Logs == "" {
 		t.Fatalf("expected describe/events/logs populated, got %+v", inputs)
+	}
+}
+
+func TestVerbOfSkipsEqualsGlobals(t *testing.T) {
+	cases := map[string]string{
+		"--context=prod --kubeconfig=/x describe pod p": "describe",
+		"--context prod -n ns get events":               "get",
+		"--namespace=ns logs p --tail=200":              "logs",
+		"":                                              "",
+	}
+	for line, want := range cases {
+		if got := verbOf(line); got != want {
+			t.Errorf("verbOf(%q) = %q, want %q", line, got, want)
+		}
 	}
 }

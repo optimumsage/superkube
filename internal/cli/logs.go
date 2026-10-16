@@ -202,21 +202,24 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 
 // boolFlag parses a kubectl-style boolean flag from args: absent is false, a
 // bare `--name` is true, and `--name=VALUE` must parse via strconv.ParseBool.
-// A presence-only check would turn `--all-containers=false` into true.
+// Like pflag, the last occurrence wins, and every occurrence is validated so a
+// typo earlier on the line isn't silently overridden.
 func boolFlag(args []string, name string) (bool, error) {
+	result := false
 	for _, a := range args {
 		if a == name {
-			return true, nil
+			result = true
+			continue
 		}
 		if v, ok := strings.CutPrefix(a, name+"="); ok {
 			b, err := strconv.ParseBool(v)
 			if err != nil {
 				return false, fmt.Errorf("invalid value %q for %s", v, name)
 			}
-			return b, nil
+			result = b
 		}
 	}
-	return false, nil
+	return result, nil
 }
 
 // podPrefixer returns a LinePrefixer that colorizes the [pod-name] tag with a

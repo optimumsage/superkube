@@ -29,8 +29,13 @@ type MultiLogOpts struct {
 	Container     string    // empty = each pod's default container
 	AllContainers bool      // stream every container of every pod (like kubectl --all-containers)
 	Warn          io.Writer // transient-problem notices (default os.Stderr)
-	TailLines     int64     // <= 0 = no limit
-	Follow        bool
+
+	// OpenAttempts / OpenRetryDelay tune retries when opening a log stream;
+	// zero values use the defaults.
+	OpenAttempts   int
+	OpenRetryDelay time.Duration
+	TailLines      int64 // <= 0 = no limit
+	Follow         bool
 }
 
 // defaultContainerAnnotation is the annotation kubectl itself consults to pick
@@ -64,12 +69,14 @@ func (l Loader) TailMulti(ctx context.Context, opts MultiLogOpts, w io.Writer, p
 // simulate transient failures (the fake clientset's GetLogs cannot fail).
 type openLogStream func(ctx context.Context, pod, container string, tail *int64) (io.ReadCloser, error)
 
-// Retry policy for opening a log stream. A container that is still starting
+// Defaults for opening a log stream. A container that is still starting
 // answers "waiting to start"; a short bounded retry rides that out, while
 // anything longer is picked up by the pod watch when the pod changes state.
-var (
-	logOpenAttempts   = 4
-	logOpenRetryDelay = time.Second
+// Overridable per call through MultiLogOpts (no package globals, so tests can
+// shorten them without racing the stream goroutines).
+const (
+	defaultOpenAttempts   = 4
+	defaultOpenRetryDelay = time.Second
 )
 
 func tailMulti(ctx context.Context, cs kubernetes.Interface, opts MultiLogOpts, w io.Writer, prefix LinePrefixer) error {
@@ -112,6 +119,13 @@ func tailMultiWith(ctx context.Context, cs kubernetes.Interface, opts MultiLogOp
 	warnOut := opts.Warn
 	if warnOut == nil {
 		warnOut = os.Stderr
+	}
+	attempts, retryDelay := opts.OpenAttempts, opts.OpenRetryDelay
+	if attempts <= 0 {
+		attempts = defaultOpenAttempts
+	}
+	if retryDelay <= 0 {
+		retryDelay = defaultOpenRetryDelay
 	}
 	var writeMu sync.Mutex
 	say := func(name string, i int, line string) {
@@ -159,7 +173,7 @@ func tailMultiWith(ctx context.Context, cs kubernetes.Interface, opts MultiLogOp
 			if sctx.Err() != nil {
 				return
 			}
-			if attempt >= logOpenAttempts || apierrors.IsForbidden(err) || apierrors.IsNotFound(err) {
+			if attempt >= attempts || apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsNotFound(err) {
 				// Give the claim back so a later pod update (e.g. the container
 				// finally starting) can try again via the watch.
 				release(key)
@@ -169,7 +183,7 @@ func tailMultiWith(ctx context.Context, cs kubernetes.Interface, opts MultiLogOp
 			select {
 			case <-sctx.Done():
 				return
-			case <-time.After(time.Duration(attempt) * logOpenRetryDelay):
+			case <-time.After(time.Duration(attempt) * retryDelay):
 			}
 		}
 	}
@@ -336,6 +350,8 @@ func watchNewPods(ctx context.Context, cs kubernetes.Interface, ns, selector, rv
 			}
 		} else if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
 			return fmt.Errorf("listing pods: %w", err)
+		} else if ctx.Err() == nil {
+			warn("pod re-list failed, retrying: " + err.Error())
 		}
 	}
 	return nil
