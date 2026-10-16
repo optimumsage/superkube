@@ -69,6 +69,10 @@ type Options struct {
 	// asset) is missing. UNSAFE: the tarball is then unauthenticated. A
 	// checksum that is present but does not match always aborts.
 	SkipChecksum bool
+
+	// Stderr receives warnings that must always be visible (default
+	// os.Stderr). Progress messages are separate and may be suppressed.
+	Stderr io.Writer
 }
 
 func (o Options) repo() string {
@@ -174,7 +178,11 @@ func Run(ctx context.Context, p *Plan, opt Options, progress func(string)) error
 			}
 			return fmt.Errorf("checksum verification: %w", err)
 		}
-		progress("warning: no checksum available — installing UNVERIFIED binary (--skip-checksum)")
+		w := opt.Stderr
+		if w == nil {
+			w = os.Stderr
+		}
+		_, _ = fmt.Fprintln(w, "warning: no checksum available — installing UNVERIFIED binary (--skip-checksum)")
 	}
 
 	progress("extracting")

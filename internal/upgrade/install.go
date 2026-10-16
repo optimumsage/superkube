@@ -17,8 +17,8 @@ import (
 )
 
 // errNoChecksumPublished is sentinel: the release exists but no checksums.txt
-// was uploaded. We treat this the same way install.sh does — warn and
-// continue. Wrapped errors are still surfaced as hard failures.
+// was uploaded (or it lists no entry for our asset). This is a hard failure
+// unless the user passes --skip-checksum; see Run.
 var errNoChecksumPublished = errors.New("no checksums.txt published")
 
 // download streams a URL into dest. It does NOT buffer the whole body in

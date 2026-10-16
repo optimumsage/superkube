@@ -70,10 +70,10 @@ Current namespace: {{ if .Namespace }}{{ .Namespace }}{{ else }}default{{ end }}
 const toolsBlock = `{{ if .ToolsAllowed }}
 You have permission to run read-only kubectl/sk commands via the Bash tool
 (get, describe, logs, events, top, explain, api-resources, api-versions,
-version, cluster-info, auth can-i, config view/get-contexts/current-context) to
+version, cluster-info, auth can-i, config get-contexts/current-context) to
 gather additional evidence beyond the data already provided below. You MUST NOT
 run any command that mutates state (apply, create, delete, edit, patch, replace,
-scale, rollout, cordon, drain, exec, port-forward, debug, attach). Prefer the
+scale, rollout, cordon, drain, exec, port-forward, debug, attach). Do NOT read Secrets or kubeconfig contents. Prefer the
 smallest set of commands needed. Always pass -n/--namespace explicitly.
 {{ end }}`
 
@@ -81,7 +81,7 @@ const tmplExplain = preamble + `
 {{ if .ToolsAllowed -}}
 You have permission to run read-only kubectl/sk commands via the Bash tool
 (get, describe, logs, events, top, explain, api-resources, api-versions,
-version, cluster-info, auth can-i, config view/get-contexts/current-context).
+version, cluster-info, auth can-i, config get-contexts/current-context). Do NOT read Secrets (any get/describe of secrets) or kubeconfig contents.
 You MUST NOT run any command that mutates state (apply, create, delete, edit,
 patch, replace, scale, rollout, cordon, drain, exec, port-forward, debug,
 attach). Prefer the smallest set of commands needed to answer. Always pass

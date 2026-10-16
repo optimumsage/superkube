@@ -262,11 +262,16 @@ func TestRun_EndToEnd_SkipChecksum(t *testing.T) {
 	}
 
 	var progressLog []string
-	err := Run(context.Background(), plan, Options{HTTPClient: f, SkipChecksum: true}, func(s string) {
+	var warn bytes.Buffer
+	err := Run(context.Background(), plan, Options{HTTPClient: f, SkipChecksum: true, Stderr: &warn}, func(s string) {
 		progressLog = append(progressLog, s)
 	})
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
+	}
+	// The unverified-install warning must not depend on --verbose progress.
+	if !strings.Contains(warn.String(), "warning:") {
+		t.Errorf("expected unconditional warning on Stderr, got %q", warn.String())
 	}
 
 	got, err := os.ReadFile(target)

@@ -14,8 +14,8 @@ import (
 )
 
 // newUpgradeCmd wires `sk upgrade`. The feature mirrors scripts/install.sh:
-// download the latest release tarball, verify its checksum when available,
-// and atomically replace the running binary. Confirmation is mandatory in
+// download the latest release tarball, verify its checksum (required unless
+// --skip-checksum), and atomically replace the running binary. Confirmation is mandatory in
 // interactive contexts; non-interactive callers must pass --yes.
 func newUpgradeCmd() *cobra.Command {
 	var (
