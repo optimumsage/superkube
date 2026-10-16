@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/optimumsage/superkube/internal/kube"
@@ -22,10 +23,33 @@ const (
 	sessNsCookie  = "sk_ns"
 )
 
-// readSession derives the active session from cookies, falling back to the
-// server's deps (which were initialized from `sk web`'s root flags + the
-// user's current kubeconfig).
+type sessionKey struct{}
+
+// withSession pins an immutable session snapshot on the request. Every later
+// readSession call in the same request returns that snapshot, so the context
+// and namespace that were authorized, digested and audited are exactly the
+// ones passed to kubectl/helm even if kubeconfig's current-context changes
+// mid-request.
+func (s *Server) withSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess := s.resolveSession(r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, sess)))
+	})
+}
+
+// readSession returns the request's pinned snapshot (resolving it once if the
+// request did not pass through withSession).
 func (s *Server) readSession(r *http.Request) session {
+	if v, ok := r.Context().Value(sessionKey{}).(session); ok {
+		return v
+	}
+	return s.resolveSession(r)
+}
+
+// resolveSession derives the concrete context + effective namespace:
+// context: cookie -> `sk --context` -> kubeconfig current-context;
+// namespace: cookie -> `sk -n` -> that context's kubeconfig namespace -> "default".
+func (s *Server) resolveSession(r *http.Request) session {
 	sess := session{
 		Context:    s.deps.Context,
 		Namespace:  s.deps.Namespace,
@@ -37,15 +61,17 @@ func (s *Server) readSession(r *http.Request) session {
 	if c, err := r.Cookie(sessNsCookie); err == nil && c.Value != "" {
 		sess.Namespace = c.Value
 	}
-	// Pin the effective context. Policy, banner, audit and every client-go /
-	// kubectl call must agree on which cluster this request targets, so when
-	// neither the cookie nor `sk --context` named one we resolve the
-	// kubeconfig's current-context here rather than letting each consumer
-	// guess independently.
-	if sess.Context == "" {
-		if c, err := s.kubeconfigLoader(sess).CurrentContext(); err == nil {
-			sess.Context = c
+	l := s.deps.Loader
+	l.KubeconfigPath = sess.Kubeconfig
+	l.Context = sess.Context
+	if ctxName, ns, err := l.CurrentContextAndNamespace(); err == nil {
+		sess.Context = ctxName
+		if sess.Namespace == "" {
+			sess.Namespace = ns
 		}
+	}
+	if sess.Namespace == "" {
+		sess.Namespace = "default"
 	}
 	return sess
 }
