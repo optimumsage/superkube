@@ -14,7 +14,9 @@ import (
 func fakeForwardCommand(t *testing.T) {
 	t.Helper()
 	old := processCommand
-	processCommand = func(int) (string, error) { return "kubectl port-forward pod/foo 8080:80", nil }
+	processCommand = func(int) (string, error) {
+		return "kubectl port-forward pod/foo svc/web pod/x pod/y svc/x 8080:80", nil
+	}
 	t.Cleanup(func() { processCommand = old })
 }
 
@@ -69,8 +71,12 @@ func TestStopDoesNotKillReusedPID(t *testing.T) {
 	if err := Add(Entry{ID: "pf-stale", Target: "pod/x", Ports: []string{"1:1"}, PID: cmd.Process.Pid, StartedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Stop("pf-stale"); err != nil {
+	stopped, err := Stop("pf-stale")
+	if err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+	if len(stopped) != 1 || stopped[0].ID != "pf-stale" {
+		t.Fatalf("Stop must return the stale entry, got %v", stopped)
 	}
 	time.Sleep(100 * time.Millisecond)
 	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {

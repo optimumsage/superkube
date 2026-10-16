@@ -31,15 +31,20 @@ import (
 
 // Entry is one tracked port-forward.
 type Entry struct {
-	ID         string    `json:"id"`
-	Target     string    `json:"target"` // e.g. "pod/foo" or "svc/web"
-	Namespace  string    `json:"namespace,omitempty"`
-	Context    string    `json:"context,omitempty"`
-	Ports      []string  `json:"ports"` // ["8080:80", "9090:9090"]
-	PID        int       `json:"pid"`
-	StartedAt  time.Time `json:"started_at"`
-	LogPath    string    `json:"log_path"`
-	Kubeconfig string    `json:"kubeconfig,omitempty"`
+	ID        string    `json:"id"`
+	Target    string    `json:"target"` // e.g. "pod/foo" or "svc/web"
+	Namespace string    `json:"namespace,omitempty"`
+	Context   string    `json:"context,omitempty"`
+	Ports     []string  `json:"ports"` // ["8080:80", "9090:9090"]
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
+	LogPath   string    `json:"log_path"`
+	// ProcStart is the OS-reported start time of the spawned process
+	// (`ps -o lstart=`), used to detect PID reuse. Empty in state files
+	// written by older versions; identification then falls back to the
+	// command line + target.
+	ProcStart  string `json:"proc_start,omitempty"`
+	Kubeconfig string `json:"kubeconfig,omitempty"`
 }
 
 // StateFile returns the path to the JSON manifest tracking active forwards.
@@ -93,9 +98,8 @@ func Load() (entries []Entry, err error) {
 	return entries, err
 }
 
-// loadLocked is the inner unlocked variant for callers that already hold the
-// state lock (withLock).
-func loadLocked() ([]Entry, error) {
+// readEntries parses the state file without any liveness filtering.
+func readEntries() ([]Entry, error) {
 	data, err := os.ReadFile(StateFile())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -109,18 +113,30 @@ func loadLocked() ([]Entry, error) {
 			return nil, fmt.Errorf("parse state file: %w", err)
 		}
 	}
-	alive := entries[:0]
+	return entries, nil
+}
+
+// loadLocked is the inner unlocked variant for callers that already hold the
+// state lock (withLock). It prunes only entries whose process is confirmed
+// gone or confirmed to be someone else's; entries we merely failed to inspect
+// are kept so a transient `ps` failure can't permanently forget a live forward.
+func loadLocked() ([]Entry, error) {
+	entries, err := readEntries()
+	if err != nil {
+		return nil, err
+	}
+	keep := entries[:0]
 	for _, e := range entries {
-		if ownsProcess(e) {
-			alive = append(alive, e)
+		if identify(e) != identStale {
+			keep = append(keep, e)
 		}
 	}
-	if len(alive) != len(entries) {
+	if len(keep) != len(entries) {
 		// Pruned some — persist the cleaner version so the next Load is fast.
-		_ = writeLocked(alive)
+		_ = writeLocked(keep)
 	}
-	sort.Slice(alive, func(i, j int) bool { return alive[i].StartedAt.Before(alive[j].StartedAt) })
-	return alive, nil
+	sort.Slice(keep, func(i, j int) bool { return keep[i].StartedAt.Before(keep[j].StartedAt) })
+	return keep, nil
 }
 
 // Add appends e to the state file. Caller must have already spawned the
@@ -136,13 +152,13 @@ func Add(e Entry) error {
 	})
 }
 
-// Remove drops the entry with the given id (or all entries if id == "all").
-// Returns the entries it removed so the caller can act on them (send SIGTERM,
-// delete log files, etc.). Missing id is not an error — Remove("nope") is a
-// no-op.
+// Remove drops the entry with the given id (or all entries if id == "all")
+// without signalling anything, and returns the entries it removed. The id is
+// matched against the raw state, before stale pruning, so a dead or
+// PID-reused forward can still be removed by id. Missing id is a no-op.
 func Remove(id string) (removed []Entry, err error) {
 	err = withLock(func() error {
-		current, err := loadLocked()
+		current, err := readEntries()
 		if err != nil {
 			return err
 		}
@@ -160,6 +176,51 @@ func Remove(id string) (removed []Entry, err error) {
 		return writeLocked(kept)
 	})
 	return removed, err
+}
+
+// Stop terminates the entries with the given id ("all" matches everything).
+// The id is matched first, then each entry's process identity is checked:
+// owned processes are signalled and removed; confirmed-stale entries (process
+// gone, or PID reused by something else) are removed without signalling;
+// entries whose identity could not be verified are left in the state file,
+// not signalled, and reported in the returned error. The returned slice holds
+// the entries that were removed.
+func Stop(id string) (stopped []Entry, err error) {
+	var unknown []string
+	err = withLock(func() error {
+		current, err := readEntries()
+		if err != nil {
+			return err
+		}
+		kept := current[:0]
+		changed := false
+		for _, e := range current {
+			if id != "all" && e.ID != id {
+				kept = append(kept, e)
+				continue
+			}
+			switch identify(e) {
+			case identOwned:
+				_ = Kill(e.PID)
+				stopped = append(stopped, e)
+				changed = true
+			case identStale:
+				stopped = append(stopped, e)
+				changed = true
+			default:
+				unknown = append(unknown, fmt.Sprintf("%s (pid %d)", e.ID, e.PID))
+				kept = append(kept, e)
+			}
+		}
+		if !changed {
+			return nil
+		}
+		return writeLocked(kept)
+	})
+	if err == nil && len(unknown) > 0 {
+		err = fmt.Errorf("could not verify process identity for %s; not signalled and left in the state file (is `ps` available?)", strings.Join(unknown, ", "))
+	}
+	return stopped, err
 }
 
 // FindByID returns the matching entry from a freshly loaded state, or
@@ -223,28 +284,72 @@ func NewID() string {
 	return fmt.Sprintf("pf-%x", time.Now().UnixNano()&0xFFFFFF)
 }
 
-// processCommand returns the command line of pid. It is a variable so tests
-// can substitute it. `ps -o command=` is available on both macOS and Linux.
-var processCommand = func(pid int) (string, error) {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+// errProcessGone means ps ran fine and reported no such process.
+var errProcessGone = errors.New("process not found")
+
+func psField(pid int, field string) (string, error) {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", field+"=").Output()
 	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(strings.TrimSpace(string(out))) == 0 {
+			return "", errProcessGone
+		}
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	v := strings.TrimSpace(string(out))
+	if v == "" {
+		return "", errProcessGone
+	}
+	return v, nil
 }
 
-// ownsProcess reports whether e.PID is alive AND still looks like the
-// `kubectl port-forward` we spawned. A reused PID (reboot, long-lived state
-// file) fails the command-line check, so the entry is treated as stale and the
-// process is never signalled. If the command line can't be read we say no:
-// dropping an entry is recoverable, killing a stranger is not.
-func ownsProcess(e Entry) bool {
+// processCommand returns the command line of pid. Variables so tests can
+// substitute them. `ps -o command=` / `lstart=` exist on macOS and Linux.
+var processCommand = func(pid int) (string, error) { return psField(pid, "command") }
+
+// processStartTime returns the OS-reported start time of pid (`ps -o lstart=`),
+// which together with the PID identifies a process across PID reuse.
+var processStartTime = func(pid int) (string, error) { return psField(pid, "lstart") }
+
+type identity int
+
+const (
+	identUnknown identity = iota // could not be inspected: keep, don't signal
+	identOwned                   // our kubectl port-forward
+	identStale                   // gone, or PID reused by something else
+)
+
+// identify decides whether e.PID is still the `kubectl port-forward` we
+// spawned. Owned requires the command line to contain both "port-forward" and
+// the recorded target, and (when recorded) the start time to match. PIDs get
+// reused, so a bare cmdline substring check would let `vim port-forward.md`
+// or another user's forward be killed. Inspection failures are Unknown, never
+// Stale: dropping a live forward is bad, signalling a stranger is worse.
+func identify(e Entry) identity {
 	if !isAlive(e.PID) {
-		return false
+		return identStale
 	}
 	cmd, err := processCommand(e.PID)
 	if err != nil {
-		return false
+		if errors.Is(err, errProcessGone) {
+			return identStale
+		}
+		return identUnknown
 	}
-	return strings.Contains(cmd, "port-forward")
+	if !strings.Contains(cmd, "port-forward") || (e.Target != "" && !strings.Contains(cmd, e.Target)) {
+		return identStale
+	}
+	if e.ProcStart != "" {
+		st, err := processStartTime(e.PID)
+		if err != nil {
+			if errors.Is(err, errProcessGone) {
+				return identStale
+			}
+			return identUnknown
+		}
+		if st != e.ProcStart {
+			return identStale
+		}
+	}
+	return identOwned
 }

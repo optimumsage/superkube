@@ -91,6 +91,11 @@ func Start(opts StartOpts) (Entry, error) {
 		Kubeconfig: opts.Kubeconfig,
 	}
 
+	// Best-effort: lets identify() detect PID reuse later.
+	if st, err := processStartTime(entry.PID); err == nil {
+		entry.ProcStart = st
+	}
+
 	// Give kubectl a brief moment to fail fast (auth error, bad target). If
 	// it dies in the first 250ms we surface the log to the caller so the
 	// user gets a useful error instead of a phantom entry.
@@ -107,23 +112,6 @@ func Start(opts StartOpts) (Entry, error) {
 		return Entry{}, err
 	}
 	return entry, nil
-}
-
-// Stop terminates the entries with the given id ("all" matches everything),
-// removes them from the state file, and returns the entries it stopped.
-func Stop(id string) ([]Entry, error) {
-	removed, err := Remove(id)
-	if err != nil {
-		return removed, err
-	}
-	for _, e := range removed {
-		// Re-verify identity right before signalling: the entry may be stale
-		// and its PID reused by an unrelated process.
-		if ownsProcess(e) {
-			_ = Kill(e.PID)
-		}
-	}
-	return removed, nil
 }
 
 // Kill sends SIGTERM, then SIGKILL after a brief grace window. Best-effort:
