@@ -103,6 +103,16 @@ func rootFlagsForSubprocess() []string {
 	return out
 }
 
+// kubectlGlobal routes the root --context/--kubeconfig flags into a kubectl
+// argv we build ourselves. Without it the TUI's actions (describe, YAML,
+// events, diagnose) would talk to the kubeconfig's current-context while the
+// pod list — built from client-go with the same flags — shows another cluster.
+// Namespace is deliberately not injected: callers pass the selected object's
+// own namespace via -n.
+func kubectlGlobal(args []string) []string {
+	return kubectl.PrependGlobalFlags(args, Flags.Context, "", Flags.Kubeconfig)
+}
+
 // makeDescribeProducer returns a producer that runs `kubectl describe pod <name>`
 // and streams stdout into w.
 func makeDescribeProducer(runner *kubectl.Runner) tui.ProducerFn {
@@ -111,7 +121,7 @@ func makeDescribeProducer(runner *kubectl.Runner) tui.ProducerFn {
 		if ns != "" {
 			args = append(args, "-n", ns)
 		}
-		return runner.Run(ctx, args, kubectl.RunOpts{Stdout: w, Stderr: w})
+		return runner.Run(ctx, kubectlGlobal(args), kubectl.RunOpts{Stdout: w, Stderr: w})
 	}
 }
 
@@ -121,7 +131,7 @@ func makeYAMLProducer(runner *kubectl.Runner, kind string) tui.ProducerFn {
 		if ns != "" {
 			args = append(args, "-n", ns)
 		}
-		return runner.Run(ctx, args, kubectl.RunOpts{Stdout: w, Stderr: w})
+		return runner.Run(ctx, kubectlGlobal(args), kubectl.RunOpts{Stdout: w, Stderr: w})
 	}
 }
 
@@ -137,7 +147,7 @@ func makeSecretYAMLProducer(runner *kubectl.Runner) tui.ProducerFn {
 			args = append(args, "-n", ns)
 		}
 		var buf bytes.Buffer
-		if err := runner.Run(ctx, args, kubectl.RunOpts{Stdout: &buf, Stderr: w}); err != nil {
+		if err := runner.Run(ctx, kubectlGlobal(args), kubectl.RunOpts{Stdout: &buf, Stderr: w}); err != nil {
 			return err
 		}
 		_, err := io.WriteString(w, maskSecretYAML(buf.String()))
@@ -155,7 +165,7 @@ func makeEventsProducer(runner *kubectl.Runner) tui.ProducerFn {
 		if ns != "" {
 			args = append(args, "-n", ns)
 		}
-		return runner.Run(ctx, args, kubectl.RunOpts{Stdout: w, Stderr: w})
+		return runner.Run(ctx, kubectlGlobal(args), kubectl.RunOpts{Stdout: w, Stderr: w})
 	}
 }
 

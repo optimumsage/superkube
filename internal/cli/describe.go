@@ -179,10 +179,7 @@ func isDescribeSectionHeader(line string) bool {
 	// "Key: Value" → not a header (there's content after the colon). Trim the
 	// trailing colon and check there's no embedded colon-space.
 	body := strings.TrimSuffix(trimmed, ":")
-	if strings.Contains(body, ": ") {
-		return false
-	}
-	return true
+	return !strings.Contains(body, ": ")
 }
 
 func styleDescribeSection(line string) string {
@@ -269,7 +266,7 @@ func isPlausibleLabel(s string) bool {
 		return false
 	}
 	first := s[0]
-	if !((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')) {
+	if (first < 'A' || first > 'Z') && (first < 'a' || first > 'z') {
 		return false
 	}
 	for i := 1; i < len(s); i++ {
@@ -328,7 +325,7 @@ func isTableHeaderRow(line, col string) bool {
 		if r == ' ' || r == '\t' {
 			continue
 		}
-		if !(r >= 'A' && r <= 'Z') {
+		if r < 'A' || r > 'Z' {
 			return false
 		}
 		break

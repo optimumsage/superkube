@@ -7,32 +7,122 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/optimumsage/superkube/internal/kube"
 	"github.com/optimumsage/superkube/internal/ui"
 )
 
-// runGetWatch is the client-go-backed path for `sk get RESOURCE -w`. It opens
-// a live watch on the resolved GVR, server-renders Tables, and redraws the
-// frame in-place on every change. Falls back to runGet's existing kubectl
-// passthrough if we can't resolve the resource (CRD discovery hiccup, etc.).
-func runGetWatch(cmd *cobra.Command, args []string) error {
-	resource := getResourceArg(args)
-	if resource == "" {
-		return errors.New("get -w: resource type required (e.g. `sk get pods -w`)")
+// parseWatchArgs decides whether `sk get ... -w` can be served by the
+// client-go live table and, if so, builds its options. It supports exactly one
+// resource kind (optionally with one name, as `pod foo` or `deploy/web`) plus
+// -n/-A/-l/--field-selector/-o wide. Anything else — several kinds
+// (`pods,svc`), several names, --show-labels, --sort-by, -L, -f, … — returns
+// ok=false and the caller forwards the whole argv to kubectl verbatim, which
+// is what the command's doc comment promises for unsupported flags. The
+// allowlist is deliberate: silently dropping a flag we don't understand would
+// show the user something other than what they asked for.
+func parseWatchArgs(args []string) (opts kube.WatchTableOpts, ok bool) {
+	var positionals []string
+	// valued returns the flag's value for "--name v" / "--name=v" forms.
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		name, val, hasEq := strings.Cut(a, "=")
+		take := func() (string, bool) {
+			if hasEq {
+				return val, true
+			}
+			if i+1 < len(args) {
+				i++
+				return args[i], true
+			}
+			return "", false
+		}
+		if !strings.HasPrefix(a, "-") {
+			positionals = append(positionals, a)
+			continue
+		}
+		switch name {
+		case "-w", "--watch":
+			if hasEq && val != "true" {
+				return opts, false
+			}
+		case "-A", "--all-namespaces":
+			opts.AllNamespaces = true
+		case "-n", "--namespace":
+			v, found := take()
+			if !found {
+				return opts, false
+			}
+			opts.Namespace = v
+		case "-l", "--selector":
+			v, found := take()
+			if !found {
+				return opts, false
+			}
+			opts.Selector = v
+		case "--field-selector":
+			v, found := take()
+			if !found {
+				return opts, false
+			}
+			opts.FieldSelector = v
+		case "-o", "--output":
+			v, found := take()
+			if !found || (v != "" && v != "wide") {
+				return opts, false
+			}
+			opts.Wide = v == "wide"
+		case "--context", "--kubeconfig":
+			// Honored through Flags / effectiveContext; just consume the value.
+			if _, found := take(); !found {
+				return opts, false
+			}
+		default:
+			return opts, false
+		}
 	}
 
-	opts := kube.WatchTableOpts{
-		Resource:      resource,
-		Namespace:     effectiveNamespace(args),
-		AllNamespaces: hasFlag(args, "-A") || hasFlag(args, "--all-namespaces"),
+	switch len(positionals) {
+	case 1:
+		res := positionals[0]
+		if strings.Contains(res, ",") {
+			return opts, false // multiple kinds
+		}
+		if kind, name, found := strings.Cut(res, "/"); found {
+			if kind == "" || name == "" || strings.Contains(name, "/") {
+				return opts, false
+			}
+			opts.Resource, opts.Name = kind, name
+		} else {
+			opts.Resource = res
+		}
+	case 2:
+		if strings.ContainsAny(positionals[0], ",/") || strings.Contains(positionals[1], "/") {
+			return opts, false
+		}
+		opts.Resource, opts.Name = positionals[0], positionals[1]
+	default:
+		return opts, false
 	}
-	if sel, ok := flagValue(args, "-l"); ok {
-		opts.Selector = sel
+	if opts.Resource == "" {
+		return opts, false
 	}
-	if sel, ok := flagValue(args, "--selector"); ok {
-		opts.Selector = sel
+	return opts, true
+}
+
+// runGetWatch is the client-go-backed path for `sk get RESOURCE -w`. It opens
+// a live watch on the resolved GVR, server-renders Tables, and redraws the
+// frame in-place on every change. opts comes from parseWatchArgs; argv shapes
+// it can't express never reach here (runGet forwards them to kubectl).
+func runGetWatch(cmd *cobra.Command, args []string, opts kube.WatchTableOpts) error {
+	if opts.Resource == "" {
+		return errors.New("get -w: resource type required (e.g. `sk get pods -w`)")
+	}
+	if opts.Namespace == "" {
+		opts.Namespace = effectiveNamespace(args)
 	}
 
 	loader := kube.Loader{
@@ -40,7 +130,10 @@ func runGetWatch(cmd *cobra.Command, args []string) error {
 		Context:        effectiveContext(args),
 	}
 
-	fmt.Fprintln(os.Stderr, ui.Render(ui.Subtle, "watching "+resource+" — Ctrl-C to stop"))
+	// Reflector logging would write straight into the redrawn table.
+	defer kube.QuietClientLogs()()
+
+	fmt.Fprintln(os.Stderr, ui.RenderTo(os.Stderr, ui.Subtle, "watching "+opts.Resource+" — Ctrl-C to stop"))
 
 	var lastLines int
 	render := func(f kube.TableFrame) {
@@ -50,7 +143,7 @@ func runGetWatch(cmd *cobra.Command, args []string) error {
 			// rather than scrolling forever.
 			fmt.Fprintf(os.Stdout, "\x1b[%dA\x1b[J", lastLines)
 		}
-		lastLines = printGetFrame(os.Stdout, f)
+		lastLines = printGetFrame(os.Stdout, f, terminalWidth())
 	}
 
 	err := loader.WatchTable(cmd.Context(), opts, render)
@@ -60,14 +153,34 @@ func runGetWatch(cmd *cobra.Command, args []string) error {
 	return err
 }
 
+// terminalWidth returns stdout's column count, or 0 when unknown.
+func terminalWidth() int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		return 0
+	}
+	return w
+}
+
 // printGetFrame writes the frame to w in lipgloss-friendly fixed-width form
 // and returns the number of lines emitted (used for the cursor-up math). The
 // header line is highlighted with ui.HeaderBg; STATUS/READY/RESTARTS/AGE/TYPE
 // cells are repainted by ui.Colorize* in place. ANSI escapes are zero-width,
 // so the cursor-up redraw math stays correct.
-func printGetFrame(w io.Writer, f kube.TableFrame) int {
+//
+// width, when > 0, is the terminal width: every line is truncated to it so no
+// row wraps. A wrapped row occupies two physical lines but is counted as one,
+// which would leave the cursor-up redraw short by a line per wrapped row and
+// stack stale frames. width <= 0 disables truncation.
+func printGetFrame(w io.Writer, f kube.TableFrame, width int) int {
+	fit := func(line string) string {
+		if width > 0 {
+			return ansi.Truncate(line, width, "")
+		}
+		return line
+	}
 	if len(f.Headers) == 0 {
-		fmt.Fprintln(w, ui.Render(ui.Subtle, "(no rows)"))
+		fmt.Fprintln(w, fit(ui.Render(ui.Subtle, "(no rows)")))
 		return 1
 	}
 	// Width math uses ui.VisualLen so any embedded ANSI in upstream cells
@@ -142,14 +255,14 @@ func printGetFrame(w io.Writer, f kube.TableFrame) int {
 		}
 		return sb.String()
 	}
-	fmt.Fprintln(w, ui.Render(ui.HeaderBg, formatRow(f.Headers, false)))
+	fmt.Fprintln(w, fit(ui.Render(ui.HeaderBg, formatRow(f.Headers, false))))
 	for _, r := range f.Rows {
-		fmt.Fprintln(w, formatRow(r, true))
+		fmt.Fprintln(w, fit(formatRow(r, true)))
 	}
 
 	emitted := 1 + len(f.Rows)
 	if summary := summarizeFrame(kind, headerNames, f.Rows); summary != "" {
-		fmt.Fprintln(w, ui.Render(ui.Subtle, summary))
+		fmt.Fprintln(w, fit(ui.Render(ui.Subtle, summary)))
 		emitted++
 	}
 	return emitted
@@ -215,37 +328,6 @@ func summarizeFrame(kind string, headers []string, rows [][]string) string {
 			bump(cellAt(r, col))
 		}
 		return formatSummary("event", len(rows), order, tally)
-	}
-	return ""
-}
-
-// getResourceArg extracts the kubectl-style resource token from a get argv,
-// skipping known value-taking flags so `sk get -n kube-system pods -w` still
-// resolves to "pods". The set of value-taking flags is the subset kubectl
-// exposes on `get`; unknown flags are treated as boolean (one token).
-func getResourceArg(args []string) string {
-	valued := map[string]bool{
-		"-n": true, "--namespace": true,
-		"-l": true, "--selector": true,
-		"-o": true, "--output": true,
-		"--context":        true,
-		"--kubeconfig":     true,
-		"--field-selector": true,
-		"--server-side":    false,
-	}
-	skipNext := false
-	for _, a := range args {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		if strings.HasPrefix(a, "-") {
-			if !strings.Contains(a, "=") && valued[a] {
-				skipNext = true
-			}
-			continue
-		}
-		return a
 	}
 	return ""
 }

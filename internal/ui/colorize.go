@@ -70,10 +70,10 @@ func ColorizeReady(value string) string {
 		if err1 != nil || err2 != nil || total == 0 {
 			return value
 		}
-		switch {
-		case ready == total:
+		switch ready {
+		case total:
 			return Success.Render(value)
-		case ready == 0:
+		case 0:
 			return Danger.Render(value)
 		default:
 			return Warning.Render(value)

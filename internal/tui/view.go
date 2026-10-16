@@ -95,14 +95,14 @@ func (m Model) View() string {
 		return ""
 	}
 	var body string
-	switch {
-	case m.view == viewHelp:
+	switch m.view {
+	case viewHelp:
 		body = m.renderHelp()
-	case m.view == viewLogs:
+	case viewLogs:
 		body = m.renderLogs()
-	case m.view == viewText:
+	case viewText:
 		body = m.renderText()
-	case m.view == viewConfirmDelete:
+	case viewConfirmDelete:
 		body = m.renderDeleteConfirm()
 	default:
 		body = m.renderListView()
@@ -152,6 +152,11 @@ func (m Model) statusBar() string {
 	right := ""
 	if !m.lastUpdate.IsZero() {
 		right = "updated " + m.lastUpdate.Format("15:04:05")
+	}
+	if synced, werr := m.state.KindStatus(m.currentKind); werr != "" {
+		right = styleErr.Render("watch error: " + werr)
+	} else if !synced {
+		right = styleSubtle.Render("loading " + strings.ToLower(m.currentKind.Title()) + "…")
 	}
 	if m.statusErr != "" {
 		right = styleErr.Render("err: " + m.statusErr)
@@ -295,6 +300,12 @@ func (m Model) renderListView() string {
 func (m Model) renderTable(width, height int) string {
 	if len(m.filtered) == 0 {
 		body := styleSubtle.Render("  no " + strings.ToLower(m.currentKind.Title()) + " match")
+		if synced, werr := m.state.KindStatus(m.currentKind); !synced {
+			body = styleSubtle.Render("  loading " + strings.ToLower(m.currentKind.Title()) + "…")
+			if werr != "" {
+				body = styleErr.Render("  cannot load " + strings.ToLower(m.currentKind.Title()) + ": " + werr)
+			}
+		}
 		return stylePanel.Width(width - 2).Height(height - 2).Render(body)
 	}
 	inner := width - 4
@@ -409,8 +420,8 @@ func (m Model) renderDetails(width, height int) string {
 			detailRow("ready", r.Ready, inner),
 			detailRow("restarts", itoa(int(r.Restarts)), inner),
 			detailRow("age", humanAgeRow(r.Created), inner),
-			detailRow("node", or(r.Node, "-"), inner),
-			detailRow("ip", or(r.IP, "-"), inner),
+			detailRow("node", dash(r.Node), inner),
+			detailRow("ip", dash(r.IP), inner),
 		)
 		if len(r.Containers) > 0 {
 			rows = append(rows, "", styleSubtle.Render("containers"))
@@ -431,8 +442,8 @@ func (m Model) renderDetails(width, height int) string {
 		)
 	case IngressRow:
 		rows = append(rows,
-			detailRow("class", or(r.Class, "-"), inner),
-			detailRow("hosts", or(r.Hosts, "-"), inner),
+			detailRow("class", dash(r.Class), inner),
+			detailRow("hosts", dash(r.Hosts), inner),
 			detailRow("age", humanAgeRow(r.Created), inner),
 		)
 	}
@@ -477,9 +488,10 @@ func detailColoredRow(label, value string, vs lipgloss.Style, width int) string 
 	return lab + " " + vs.Render(v)
 }
 
-func or(s, fallback string) string {
+// dash renders an empty detail value as "-".
+func dash(s string) string {
 	if s == "" {
-		return fallback
+		return "-"
 	}
 	return s
 }

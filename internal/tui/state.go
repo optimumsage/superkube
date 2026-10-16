@@ -177,10 +177,74 @@ func ColHeaders(k Kind) []string {
 type State struct {
 	mu     sync.Mutex
 	byKind map[Kind]map[string]Row
+	synced map[Kind]bool
+	errs   map[Kind]string
+	// errGen counts SetError calls per kind. A success that wants to clear an
+	// error records the generation before it starts and clears only if no
+	// newer failure has been recorded since (ClearErrorIfGen).
+	errGen map[Kind]uint64
 }
 
 func NewState() *State {
-	return &State{byKind: map[Kind]map[string]Row{}}
+	return &State{
+		byKind: map[Kind]map[string]Row{},
+		synced: map[Kind]bool{},
+		errs:   map[Kind]string{},
+		errGen: map[Kind]uint64{},
+	}
+}
+
+// SetSynced marks kind's initial LIST as complete. It deliberately leaves
+// errors alone: the LIST can succeed while the WATCH is forbidden.
+func (s *State) SetSynced(kind Kind) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.synced[kind] = true
+}
+
+// ClearError drops kind's recorded watch error (the informer's recovery
+// watcher calls it once list/watch is progressing again).
+func (s *State) ClearError(kind Kind) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.errs, kind)
+}
+
+// SetError records the latest watch/list failure for kind (shown in the
+// status bar). Cleared by ClearError.
+func (s *State) SetError(kind Kind, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errs[kind] = msg
+	s.errGen[kind]++
+}
+
+// ErrGen returns kind's current error generation.
+func (s *State) ErrGen(kind Kind) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.errGen[kind]
+}
+
+// ClearErrorIfGen clears kind's error only if no failure was recorded after
+// generation gen was read, so a late success can never erase a newer failure.
+// Record and clear share one mutex, which makes the check-and-clear atomic.
+func (s *State) ClearErrorIfGen(kind Kind, gen uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.errGen[kind] != gen {
+		return false
+	}
+	delete(s.errs, kind)
+	return true
+}
+
+// KindStatus reports whether kind has completed its initial sync and the
+// most recent watch error, if any.
+func (s *State) KindStatus(kind Kind) (synced bool, errMsg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.synced[kind], s.errs[kind]
 }
 
 // Upsert keeps backwards compatibility for tests/callers that thought of the
@@ -210,19 +274,6 @@ func (s *State) DeleteRow(kind Kind, key string) {
 	if m := s.byKind[kind]; m != nil {
 		delete(m, key)
 	}
-}
-
-// Snapshot returns the current pods sorted by namespace then name. Kept for
-// backwards compatibility with the pod-centric call sites.
-func (s *State) Snapshot() []PodRow {
-	rows := s.SnapshotKind(KindPod)
-	out := make([]PodRow, 0, len(rows))
-	for _, r := range rows {
-		if p, ok := r.(PodRow); ok {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // SnapshotKind returns the rows for kind in (namespace, name) order. Returns

@@ -40,21 +40,38 @@ func MaybeRotate() {
 	pruneArchives(dir, keepArchives)
 }
 
-func gzipFile(path string) error {
+// gzipFile compresses path to path+".gz". The archive is only considered
+// valid once the gzip stream is closed and the file is synced and closed; on
+// any failure the partial archive is removed so the caller keeps the source.
+func gzipFile(path string) (err error) {
 	in, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	out, err := os.OpenFile(path+".gz", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	defer func() { _ = in.Close() }()
+	dst := path + ".gz"
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		if err != nil {
+			_ = out.Close()
+			_ = os.Remove(dst)
+		}
+	}()
 	gz := gzip.NewWriter(out)
-	defer gz.Close()
-	_, err = io.Copy(gz, in)
-	return err
+	if _, err = io.Copy(gz, in); err != nil {
+		_ = gz.Close()
+		return err
+	}
+	if err = gz.Close(); err != nil {
+		return err
+	}
+	if err = out.Sync(); err != nil {
+		return err
+	}
+	return out.Close()
 }
 
 func pruneArchives(dir string, keep int) {
