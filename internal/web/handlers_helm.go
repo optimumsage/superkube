@@ -128,6 +128,9 @@ func (s *Server) apiHelmReleaseStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
+	if s.badInput(w, ns, name) || s.badRevision(w, r) {
+		return
+	}
 	args := []string{"status", name, "-n", ns, "-o", "json"}
 	if rev := r.URL.Query().Get("revision"); rev != "" {
 		args = append(args, "--revision", rev)
@@ -150,6 +153,9 @@ func (s *Server) apiHelmReleaseValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
+	if s.badInput(w, ns, name) || s.badRevision(w, r) {
+		return
+	}
 	args := []string{"get", "values", name, "-n", ns, "-o", "yaml"}
 	if r.URL.Query().Get("computed") == "1" {
 		args = append(args, "-a")
@@ -166,6 +172,9 @@ func (s *Server) apiHelmReleaseManifest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
+	if s.badInput(w, ns, name) || s.badRevision(w, r) {
+		return
+	}
 	args := []string{"get", "manifest", name, "-n", ns}
 	if rev := r.URL.Query().Get("revision"); rev != "" {
 		args = append(args, "--revision", rev)
@@ -179,6 +188,9 @@ func (s *Server) apiHelmReleaseNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
+	if s.badInput(w, ns, name) || s.badRevision(w, r) {
+		return
+	}
 	args := []string{"get", "notes", name, "-n", ns}
 	if rev := r.URL.Query().Get("revision"); rev != "" {
 		args = append(args, "--revision", rev)
@@ -192,6 +204,9 @@ func (s *Server) apiHelmReleaseHooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
+	if s.badInput(w, ns, name) || s.badRevision(w, r) {
+		return
+	}
 	args := []string{"get", "hooks", name, "-n", ns}
 	if rev := r.URL.Query().Get("revision"); rev != "" {
 		args = append(args, "--revision", rev)
@@ -205,6 +220,9 @@ func (s *Server) apiHelmReleaseHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
+	if s.badInput(w, ns, name) || s.badRevision(w, r) {
+		return
+	}
 	args := []string{"history", name, "-n", ns, "-o", "json"}
 	out, code := s.runHelmCaptured(r, args)
 	if code != 0 {
@@ -233,7 +251,8 @@ func (s *Server) apiHelmSearch(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "--versions")
 	}
 	if term != "" {
-		args = append(args, term)
+		// "--" so a term like "--kubeconfig=/x" is data, never a flag.
+		args = append(args, "--", term)
 	} else {
 		// `helm search repo` requires at least one arg; "" lists everything.
 		args = append(args, "")
@@ -261,6 +280,9 @@ func (s *Server) apiHelmChartValues(w http.ResponseWriter, r *http.Request) {
 	chart := r.URL.Query().Get("chart")
 	if repo == "" || chart == "" {
 		s.render.Error(w, http.StatusBadRequest, "repo and chart required")
+		return
+	}
+	if s.badInput(w, repo, chart) || s.badOptInput(w, r.URL.Query().Get("version")) {
 		return
 	}
 	args := []string{"show", "values", repo + "/" + chart}

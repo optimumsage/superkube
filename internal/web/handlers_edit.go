@@ -39,6 +39,9 @@ func (s *Server) fragResourceEdit(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
 	ns := r.PathValue("ns")
 	name := r.PathValue("name")
+	if s.badInput(w, ns, name) {
+		return
+	}
 	if !editableKinds[kind] {
 		s.render.Error(w, http.StatusNotFound, "edit not supported for kind "+kind)
 		return
@@ -61,6 +64,9 @@ func (s *Server) fragResourceEdit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiSecretYAMLRevealed(w http.ResponseWriter, r *http.Request) {
 	ns := r.PathValue("ns")
 	name := r.PathValue("name")
+	if s.badInput(w, ns, name) {
+		return
+	}
 	sess := s.readSession(r)
 	full := sess.prependGlobalFlagsNoNS([]string{"get", "secret", name, "-n", ns, "-o", "yaml"})
 

@@ -122,6 +122,9 @@ func (s *Server) streamWatch(w http.ResponseWriter, r *http.Request) {
 // apiResourceDescribe shells out to `kubectl describe <kind> <name>` and
 // returns plain text.
 func (s *Server) apiResourceDescribe(w http.ResponseWriter, r *http.Request) {
+	if s.badInput(w, r.PathValue("kind"), r.PathValue("name"), r.PathValue("ns")) {
+		return
+	}
 	s.captureKubectlText(w, r, []string{"describe", r.PathValue("kind"), r.PathValue("name"), "-n", r.PathValue("ns")})
 }
 
@@ -131,6 +134,9 @@ func (s *Server) apiResourceDescribe(w http.ResponseWriter, r *http.Request) {
 // what kubectl prints).
 func (s *Server) apiResourceYAML(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
+	if s.badInput(w, kind, r.PathValue("name"), r.PathValue("ns")) {
+		return
+	}
 	if isSecretKind(kind) && r.URL.Query().Get("reveal") == "1" {
 		s.apiSecretYAMLRevealed(w, r)
 		return
@@ -152,6 +158,9 @@ func (s *Server) apiResourceEvents(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
 	name := r.PathValue("name")
 	ns := r.PathValue("ns")
+	if s.badInput(w, kind, name, ns) {
+		return
+	}
 	s.captureKubectlText(w, r, []string{"events", "--for", kind + "/" + name, "-n", ns})
 }
 

@@ -46,11 +46,27 @@ func (s *Server) apiPFStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := s.readSession(r)
-	if s.gateForbidden(w, sess, "port-forward", append([]string{body.Target}, body.Ports...)) {
+	if !validPortForwardTarget(body.Target) || !validPFAddress(body.Address) || optBad(body.Namespace) {
+		s.render.Error(w, http.StatusBadRequest, "invalid target, namespace or address")
 		return
+	}
+	for _, p := range body.Ports {
+		if !validPortSpec(p) {
+			s.render.Error(w, http.StatusBadRequest, "invalid port spec "+p)
+			return
+		}
 	}
 	if body.Namespace == "" {
 		body.Namespace = sess.Namespace
+	}
+	// Policy sees the complete effective argv, including -n and --address.
+	pfArgs := append([]string{body.Target}, body.Ports...)
+	pfArgs = append(pfArgs, "-n", body.Namespace)
+	if body.Address != "" {
+		pfArgs = append(pfArgs, "--address", body.Address)
+	}
+	if s.gateForbidden(w, sess, "port-forward", pfArgs) {
+		return
 	}
 	e, err := portforward.Start(portforward.StartOpts{
 		Target:     body.Target,

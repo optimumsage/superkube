@@ -81,6 +81,9 @@ func (s *Server) apiAILogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pod required", http.StatusBadRequest)
 		return
 	}
+	if s.badInput(w, body.Pod) || s.badOptInput(w, body.Namespace, body.Container) {
+		return
+	}
 	if body.Tail == 0 {
 		body.Tail = 200
 	}
@@ -125,6 +128,9 @@ func (s *Server) runDiagnose(w http.ResponseWriter, r *http.Request, tmpl string
 	}
 	if body.Kind == "" {
 		body.Kind = "pod"
+	}
+	if s.badInput(w, body.Kind, body.Name) || s.badOptInput(w, body.Namespace) {
+		return
 	}
 	provider, err := s.deps.AIProvider()
 	if err != nil || provider == nil {

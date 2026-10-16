@@ -174,7 +174,7 @@ func (s *Server) apiHelmUpgradePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body helmUpgradeRequest
-	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.Namespace, body.Chart) {
+	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.Namespace, body.Chart) || optBad(body.Version) {
 		s.render.Error(w, http.StatusBadRequest, "name, namespace, chart required")
 		return
 	}
@@ -205,7 +205,7 @@ func (s *Server) apiHelmUpgradeCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body helmUpgradeRequest
-	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.Namespace, body.Chart) {
+	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.Namespace, body.Chart) || optBad(body.Version) {
 		s.render.Error(w, http.StatusBadRequest, "name, namespace, chart required")
 		return
 	}
@@ -286,7 +286,7 @@ func (s *Server) apiHelmInstallPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body helmInstallRequest
-	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.Namespace, body.Chart) {
+	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.Namespace, body.Chart) || optBad(body.Version) {
 		s.render.Error(w, http.StatusBadRequest, "name, namespace, chart required")
 		return
 	}
@@ -317,7 +317,7 @@ func (s *Server) apiHelmInstallCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body helmInstallRequest
-	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.Namespace, body.Chart) {
+	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.Namespace, body.Chart) || optBad(body.Version) {
 		s.render.Error(w, http.StatusBadRequest, "name, namespace, chart required")
 		return
 	}
@@ -402,7 +402,7 @@ func (s *Server) apiHelmRepoAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body helmRepoAddRequest
-	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.URL) {
+	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name, body.URL) || optBad(body.Username) {
 		s.render.Error(w, http.StatusBadRequest, "name and url required")
 		return
 	}
