@@ -101,46 +101,6 @@ func guardPassthrough(verb string, args []string) error {
 	return nil
 }
 
-// guardedVerbs are the verbs sk guards itself; seeing one of them as a token
-// of a command routed to plain passthrough means argv scanning and the user
-// disagree about what the verb is.
-var guardedVerbs = []string{"delete", "apply", "scale", "rollout", "drain", "cordon"}
-
-// backstopGuard is the fail-closed net under verb routing. If a command is
-// going to passthrough but any token before `--` (other than the routed verb)
-// equals a guarded verb, the forbid rules of that verb are enforced anyway,
-// and a non-read-only command without --yes is refused in non-interactive
-// contexts. It can false-positive (e.g. a pod named "delete"); that costs
-// one --yes, whereas a misroute would skip every guardrail.
-func backstopGuard(verb string, verbIdx int, args []string) error {
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	for i, a := range args {
-		if a == "--" {
-			break
-		}
-		if i == verbIdx {
-			continue
-		}
-		for _, g := range guardedVerbs {
-			if a != g {
-				continue
-			}
-			if err := requireValidConfig(g); err != nil {
-				return err
-			}
-			if rule, blocked := Policy().IsForbidden(g, args); blocked {
-				return fmt.Errorf("%s refused by policy %q for context matching %q",
-					g, rule, Policy().MatchedPattern)
-			}
-			if !yes && !readOnlyOp(verb, args) && !ui.IsStdinTTY() {
-				return fmt.Errorf("ambiguous command line: %q may be the guarded verb %q but was routed as %q; refused non-interactively, pass --yes to run it anyway",
-					a, g, verb)
-			}
-		}
-	}
-	return nil
-}
-
 // showPassthroughBanner prints the context banner for passthrough commands,
 // which skip cobra's PersistentPreRun. Only on a stderr terminal so piped
 // stderr stays clean.

@@ -30,11 +30,10 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return errors.New("delete: TYPE NAME required, or --all")
 	}
 
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	all := hasFlag(args, "--all")
+	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	all := boolFlag(args, "--all")
 	// Drop superkube-only flags before forwarding to kubectl.
-	kubectlArgs := stripFlag(args, "--yes")
-	kubectlArgs = stripFlag(kubectlArgs, "-y")
+	kubectlArgs := stripSkFlags(args)
 
 	// Policy check: forbidden operations are blocked outright, regardless of
 	// --yes. Bypassing requires editing config.yaml.

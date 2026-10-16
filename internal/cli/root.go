@@ -50,17 +50,18 @@ var Flags = &PersistentFlags{}
 func Execute(args []string) int {
 	root := NewRootCmd()
 	start := time.Now()
+	// origArgs is what the user typed. Passthrough and the audit row always
+	// get it; any normalization below is only for cobra's view.
+	origArgs := args
 
 	// Guarded commands set DisableFlagParsing (so unknown kubectl flags reach
-	// kubectl), which means cobra never fills Flags.Context/Namespace/
-	// Kubeconfig for them. Pre-parse those from raw argv — before routing —
-	// so policy resolution, the banner and the audit row all see the context
-	// the command will really run against. argv itself is left untouched.
-	args = normalizeVerbosity(args)
+	// kubectl), which means cobra never fills Flags for them. Pre-parse the
+	// root flags from raw argv — before routing — so policy resolution, the
+	// banner and the audit row all see the context the command will really
+	// run against. Policy is resolved over every context that COULD apply
+	// (fail-closed), not just the scanner's best guess; see policyContexts.
 	sf := scanGlobalFlags(args)
 	applyScannedFlags(sf)
-	// Policy is resolved over every context that COULD apply (fail-closed),
-	// not just the scanner's best guess; see policyContexts.
 	argvCands = scanCandidates(args, sf)
 	loadPolicy()
 
@@ -70,6 +71,15 @@ func Execute(args []string) int {
 	// receives the full argv unchanged so kubectl-global flags (e.g. -v=8,
 	// --server) survive.
 	verb, verbIdx, hasVerb := firstVerbAt(args)
+
+	// Fail closed on command-specific flags placed before the verb: we can't
+	// be sure which token is the verb, so rather than risk routing a guarded
+	// command around its guardrails we ask the user to reorder.
+	if err := leadAmbiguity(args, verbIdx, hasVerb); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		recordAudit(verb, origArgs, 1, time.Since(start))
+		return 1
+	}
 
 	// Resource shortcut: `sk pods` → `sk get pods`. Only when the first verb
 	// isn't already a known sk subcommand AND names a built-in kubectl resource.
@@ -85,36 +95,24 @@ func Execute(args []string) int {
 	if hasVerb && !isKnownCommand(root, verb) {
 		var code int
 		showPassthroughBanner(isatty.IsTerminal(os.Stderr.Fd()))
-		err := guardPassthrough(verb, args)
-		if err == nil {
-			err = backstopGuard(verb, verbIdx, args)
-		}
-		if err != nil {
+		if err := guardPassthrough(verb, args); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			code = 1
 		} else {
 			code = runPassthrough(rootContext(), args)
 		}
-		recordAudit(verb, args, code, time.Since(start))
+		recordAudit(verb, origArgs, code, time.Since(start))
 		return code
 	}
 
-	// Put the verb first so cobra's own (flag-agnostic) subcommand search
-	// agrees with firstVerbAt; leading flags simply follow the verb, which is
-	// where DisableFlagParsing commands see them anyway.
-	auditArgs := args
-	if hasVerb && verbIdx > 0 && args[verbIdx-1] != "--" {
-		reordered := append([]string{args[verbIdx]}, args[:verbIdx]...)
-		args = append(reordered, args[verbIdx+1:]...)
-	}
-	root.SetArgs(args)
+	root.SetArgs(cobraArgs(root, args, verbIdx, hasVerb))
 	err := root.ExecuteContext(rootContext())
 	code := 0
 	if err != nil {
 		code = handleExecuteErr(err)
 	}
 	if hasVerb {
-		recordAudit(verb, auditArgs, code, time.Since(start))
+		recordAudit(verb, origArgs, code, time.Since(start))
 	}
 	return code
 }
@@ -202,7 +200,8 @@ func NewRootCmd() *cobra.Command {
 	_ = f.MarkHidden("v")
 	f.StringVar(&Flags.AIProvider, "ai", "", "AI provider: claude|antigravity (auto-detect by default)")
 	f.BoolVar(&Flags.Yes, "yes", false, "skip confirmation prompts (use with care)")
-	f.StringVar(&Flags.DryRun, "dry-run", "auto", "dry-run mode: auto|server|client|none")
+	f.StringVar(&Flags.DryRun, "dry-run", "auto", "dry-run mode: auto|server|client|none (bare --dry-run means client; values need =)")
+	f.Lookup("dry-run").NoOptDefVal = "client" // kubectl semantics: never eats the next token
 	f.BoolVar(&Flags.Plain, "plain", false, "disable color/TUI output")
 	f.BoolVarP(&Flags.Verbose, "verbose", "v", false, "verbose output")
 	f.StringVar(&Flags.Audit, "audit", "", "audit logging: on|off (default: on, or audit.enabled from config)")
@@ -426,18 +425,37 @@ var errSilentFail = errors.New("silent failure")
 // firstVerb scans args left-to-right, skipping leading root flags, and returns
 // the first positional token as the verb. We use it only for routing decisions
 // (cobra vs passthrough) and the audit verb. Passthrough always receives the
-// full argv unchanged so kubectl-global flags survive.
+// original argv so kubectl-global flags survive.
 //
-// Flag/value pairing comes from the single shared table in
-// guardrail.FlagAt (superkube's flags, kubectl's globals and the per-verb
-// value flags), so `sk --as admin --context prod -l app=x delete pod x`
+// Flag/value pairing and short-cluster parsing come from the single shared
+// table in guardrail.FlagsAt (superkube's flags, kubectl's globals and the
+// per-verb value flags), so `sk --as admin --context prod delete pod x`
 // routes to delete, not "admin". Unknown flags are treated as boolean.
-// --dry-run and --cascade only take the next token when it is a valid value
-// (a bare `--dry-run` is legal), and `-v`/`--v` take it only when numeric:
-// kubectl's is a verbosity level, superkube's `-v` the boolean --verbose.
+// `--dry-run`/`--cascade` never take the next token (pflag requires `=`).
+// Before the verb, `--ai` is superkube's provider flag and takes a value; after
+// it, `logs --ai` is a boolean.
 func firstVerb(args []string) (verb string, ok bool) {
 	v, _, found := firstVerbAt(args)
 	return v, found
+}
+
+// parseTok parses the flag token at args[i]. lead is true for tokens before
+// the verb, where `--ai` takes a value. n is the number of argv tokens the
+// flag occupies.
+func parseTok(args []string, i int, lead bool) (fs []guardrail.Flag, n int, ok bool) {
+	fs, ok = guardrail.FlagsAt(args, i)
+	if !ok {
+		return nil, 0, false
+	}
+	last := &fs[len(fs)-1]
+	if lead && last.Name == "ai" && !last.HasVal && i+1 < len(args) {
+		last.UsesNext = true
+	}
+	n = 1
+	if last.UsesNext {
+		n = 2
+	}
+	return fs, n, true
 }
 
 // firstVerbAt is firstVerb plus the verb's index in args (so callers that need
@@ -454,11 +472,8 @@ func firstVerbAt(args []string) (verb string, idx int, ok bool) {
 			}
 			return "", 0, false
 		}
-		if f, isFlag := guardrail.FlagAt(args, i); isFlag {
-			i++
-			if f.UsesNext {
-				i++
-			}
+		if _, n, isFlag := parseTok(args, i, true); isFlag {
+			i += n
 			continue
 		}
 		return a, i, true
@@ -473,59 +488,194 @@ type scannedFlags struct {
 	Namespace  string
 	Audit      string
 	AI         string
+	DryRun     string
 	AITimeout  time.Duration
 	Yes        bool
 	Plain      bool
+	Verbose    bool
+	NoContext  bool
+	Tools      bool
+}
+
+func truthy(f guardrail.Flag, val string) bool {
+	if !f.HasVal {
+		return true
+	}
+	switch strings.ToLower(val) {
+	case "false", "0", "f", "no":
+		return false
+	}
+	return true
 }
 
 // scanGlobalFlags extracts the root flags from raw argv, in `--x=v` and
 // `--x v` forms, anywhere (before or after the verb), last occurrence wins.
 // Needed because DisableFlagParsing commands never let cobra fill Flags, and
-// so that explicit flags beat config.yaml defaults for them too. Scanning
-// stops at a bare `--`. `--ai` is only honored BEFORE the verb: after it,
-// `logs --ai` is a boolean owned by that command. Note single-dash tokens are
-// shorthand clusters, so `-context=prod` is not a context override. The argv
-// is not modified. Best guess only: policy uses scanCandidates (fail-closed).
+// so explicit flags beat config.yaml defaults for them too. Scanning stops at
+// a bare `--`. `--ai` is only honored BEFORE the verb: after it, `logs --ai`
+// is a boolean owned by that command. Boolean flags honor `=false`. Single-dash
+// tokens are shorthand clusters, so `-context=prod` is not a context override.
+// The argv is not modified. Best guess only: policy uses scanCandidates.
 func scanGlobalFlags(args []string) scannedFlags {
 	var sf scannedFlags
 	_, verbIdx, hasVerb := firstVerbAt(args)
-	for i := 0; i < len(args); i++ {
+	for i := 0; i < len(args); {
 		if args[i] == "--" {
 			break
 		}
-		f, ok := guardrail.FlagAt(args, i)
+		lead := hasVerb && i < verbIdx
+		fs, n, ok := parseTok(args, i, lead)
 		if !ok {
+			i++
 			continue
 		}
-		val := f.Val
-		if f.UsesNext {
-			val = args[i+1]
-			i++
-		}
-		switch f.Name {
-		case "context":
-			sf.Context = val
-		case "kubeconfig":
-			sf.Kubeconfig = val
-		case "namespace":
-			sf.Namespace = val
-		case "audit":
-			sf.Audit = val
-		case "ai":
-			if hasVerb && i < verbIdx {
-				sf.AI = val
+		for j, f := range fs {
+			val := f.Val
+			if j == len(fs)-1 && f.UsesNext {
+				val = args[i+1]
 			}
-		case "ai-timeout":
-			if d, err := time.ParseDuration(val); err == nil && d > 0 {
-				sf.AITimeout = d
+			switch f.Name {
+			case "context":
+				sf.Context = val
+			case "kubeconfig":
+				sf.Kubeconfig = val
+			case "namespace":
+				sf.Namespace = val
+			case "audit":
+				sf.Audit = val
+			case "ai":
+				if lead {
+					sf.AI = val
+				}
+			case "ai-timeout":
+				if d, err := time.ParseDuration(val); err == nil && d > 0 {
+					sf.AITimeout = d
+				}
+			case "dry-run":
+				sf.DryRun = "client"
+				if f.HasVal {
+					sf.DryRun = val
+				}
+			case "yes":
+				sf.Yes = truthy(f, val)
+			case "plain":
+				sf.Plain = truthy(f, val)
+			case "verbose":
+				sf.Verbose = truthy(f, val)
+			case "no-context":
+				sf.NoContext = truthy(f, val)
+			case "tools":
+				sf.Tools = truthy(f, val)
 			}
-		case "yes":
-			sf.Yes = !f.HasVal || val == "true"
-		case "plain":
-			sf.Plain = !f.HasVal || val == "true"
 		}
+		i += n
 	}
 	return sf
+}
+
+// leadAmbiguity refuses, with a clear message, a guarded verb whose leading
+// flags include something that is neither a superkube root flag nor a known
+// kubectl global flag (`-l app=web delete`, `-Rf x.yaml delete`,
+// `--unknown foo delete`). We cannot know whether such a flag takes a value,
+// so we cannot be sure which token is the verb; guessing wrong would route a
+// delete around its guardrails. When verb routing is unambiguous (only known
+// flags before the verb) nothing is refused, so e.g. `sk auth can-i delete
+// pods` is unaffected.
+func leadAmbiguity(args []string, verbIdx int, hasVerb bool) error {
+	if !hasVerb {
+		return nil
+	}
+	ambiguous := false
+	for i := 0; i < verbIdx; {
+		fs, n, ok := parseTok(args, i, true)
+		if !ok {
+			i++
+			continue
+		}
+		for _, f := range fs {
+			if !guardrail.IsSkRoot(f.Name) && !guardrail.IsKubectlGlobal(f.Name) {
+				ambiguous = true
+			}
+		}
+		i += n
+	}
+	if !ambiguous {
+		return nil
+	}
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		for _, g := range guardedVerbs {
+			if a == g {
+				return fmt.Errorf("put command flags after the verb (e.g. sk %s -l app=web …): the flags before %q are ambiguous", g, g)
+			}
+		}
+	}
+	return nil
+}
+
+// guardedVerbs are the verbs sk guards itself.
+var guardedVerbs = []string{"delete", "apply", "scale", "rollout", "drain", "cordon"}
+
+// childByName finds a direct subcommand by name or alias.
+func childByName(cmd *cobra.Command, name string) *cobra.Command {
+	for _, c := range cmd.Commands() {
+		if c.Name() == name {
+			return c
+		}
+		for _, a := range c.Aliases {
+			if a == name {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
+// cobraArgs builds the argv cobra sees. Cobra's own subcommand search is not
+// flag-aware (it assumes any unknown `--flag` takes a value), so we put the
+// verb (and subcommand chain, e.g. `configmap edit`) first. Leading
+// superkube root flags are dropped: scanGlobalFlags already applied them to
+// Flags (honoring `--yes=false`), and keeping `--ai claude` in argv would leak
+// `claude` into kubectl args. Every other leading flag (kubectl globals) moves
+// to just after the LEAF command, where DisableFlagParsing commands forward it
+// to kubectl. kubectl's `-v N` forms are normalized to `--v=N`.
+func cobraArgs(root *cobra.Command, args []string, verbIdx int, hasVerb bool) []string {
+	if !hasVerb || verbIdx == 0 || args[verbIdx-1] == "--" {
+		return normalizeVerbosity(args)
+	}
+	var moved []string
+	for i := 0; i < verbIdx; {
+		fs, n, ok := parseTok(args, i, true)
+		if !ok {
+			return normalizeVerbosity(args) // stray `--`: leave as typed
+		}
+		allSk := true
+		for _, f := range fs {
+			if !guardrail.IsSkRoot(f.Name) {
+				allSk = false
+			}
+		}
+		if !allSk {
+			moved = append(moved, args[i:i+n]...)
+		}
+		i += n
+	}
+	cmd := childByName(root, args[verbIdx])
+	j := verbIdx + 1
+	for cmd != nil && j < len(args) {
+		sub := childByName(cmd, args[j])
+		if sub == nil {
+			break
+		}
+		cmd = sub
+		j++
+	}
+	out := append([]string(nil), args[verbIdx:j]...)
+	out = append(out, moved...)
+	out = append(out, args[j:]...)
+	return normalizeVerbosity(out)
 }
 
 // argvCandidates lists every value that COULD be a context/kubeconfig
@@ -538,7 +688,10 @@ type argvCandidates struct {
 
 func scanCandidates(args []string, sf scannedFlags) argvCandidates {
 	var c argvCandidates
-	raw := func(name string) (vals []string, empty bool) {
+	// raw returns every `--name=V` / `--name V` value and whether any of them
+	// is ambiguous: empty, or preceded by a flag that either consumes it as
+	// its own value or is not a KNOWN boolean (so it might have).
+	raw := func(name string) (vals []string, ambiguous bool) {
 		for i, a := range args {
 			if a == "--" {
 				break
@@ -555,22 +708,30 @@ func scanCandidates(args []string, sf scannedFlags) argvCandidates {
 				continue
 			}
 			if v == "" {
-				empty = true
+				ambiguous = true
+			}
+			if i > 0 && strings.HasPrefix(args[i-1], "-") && args[i-1] != "--" && !strings.Contains(args[i-1], "=") {
+				if fs, ok := guardrail.FlagsAt(args, i-1); ok {
+					last := fs[len(fs)-1]
+					if last.UsesNext || (!last.HasVal && !guardrail.IsKnownBool(last.Name)) {
+						ambiguous = true
+					}
+				}
 			}
 			vals = append(vals, v)
 		}
-		return vals, empty
+		return vals, ambiguous
 	}
-	ambiguous := func(vals []string, empty bool, walked string) bool {
+	disagree := func(vals []string, walked string) bool {
 		d := distinct(vals)
-		return empty || len(d) > 1 || (len(d) == 1 && d[0] != walked)
+		return len(d) > 1 || (len(d) == 1 && d[0] != walked)
 	}
-	cv, ce := raw("context")
+	cv, ca := raw("context")
 	c.contexts = distinct(cv)
-	c.ambiguousContext = ambiguous(cv, ce, sf.Context)
-	kv, ke := raw("kubeconfig")
+	c.ambiguousContext = ca || disagree(cv, sf.Context)
+	kv, ka := raw("kubeconfig")
 	c.kubeconfigs = distinct(kv)
-	c.ambiguousKubeconf = ambiguous(kv, ke, sf.Kubeconfig)
+	c.ambiguousKubeconf = ka || disagree(kv, sf.Kubeconfig)
 	return c
 }
 
@@ -604,15 +765,17 @@ func applyScannedFlags(sf scannedFlags) {
 	if sf.AI != "" {
 		Flags.AIProvider = sf.AI
 	}
+	if sf.DryRun != "" {
+		Flags.DryRun = sf.DryRun
+	}
 	if sf.AITimeout > 0 {
 		Flags.AITimeout = sf.AITimeout
 	}
-	if sf.Yes {
-		Flags.Yes = true
-	}
-	if sf.Plain {
-		Flags.Plain = true
-	}
+	Flags.Yes = Flags.Yes || sf.Yes
+	Flags.Plain = Flags.Plain || sf.Plain
+	Flags.Verbose = Flags.Verbose || sf.Verbose
+	Flags.NoContext = Flags.NoContext || sf.NoContext
+	Flags.Tools = Flags.Tools || sf.Tools
 }
 
 // currentContextOf returns the kubeconfig's current-context ("" on error).
@@ -658,24 +821,30 @@ func policyContexts(c argvCandidates) []string {
 
 // normalizeVerbosity rewrites kubectl's verbosity forms (`-v 8`, `-v8`,
 // `-v=8`, `--v 8`) to `--v=8` so cobra never mistakes the number for a
-// command. A bare `-v` stays superkube's boolean --verbose.
+// command. It walks argv with real flag/value pairing, so a value that merely
+// looks like a verbosity flag (`--token -v8`) is left alone. A bare `-v`
+// stays superkube's boolean --verbose. Only cobra's view is normalized;
+// passthrough and audit keep the original argv.
 func normalizeVerbosity(args []string) []string {
 	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
+	for i := 0; i < len(args); {
 		if args[i] == "--" {
 			return append(out, args[i:]...)
 		}
-		f, ok := guardrail.FlagAt(args, i)
-		if !ok || f.Name != "v" || (!f.UsesNext && !f.HasVal) {
+		fs, n, ok := parseTok(args, i, true)
+		if ok && len(fs) == 1 && fs[0].Name == "v" && (fs[0].UsesNext || fs[0].HasVal) {
+			val := fs[0].Val
+			if fs[0].UsesNext {
+				val = args[i+1]
+			}
+			out = append(out, "--v="+val)
+		} else if ok {
+			out = append(out, args[i:i+n]...)
+		} else {
 			out = append(out, args[i])
-			continue
+			n = 1
 		}
-		val := f.Val
-		if f.UsesNext {
-			val = args[i+1]
-			i++
-		}
-		out = append(out, "--v="+val)
+		i += n
 	}
 	return out
 }

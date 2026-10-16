@@ -26,9 +26,8 @@ func runScale(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return errors.New("scale: --replicas=N and TYPE/NAME required")
 	}
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	kubectlArgs := stripFlag(args, "--yes")
-	kubectlArgs = stripFlag(kubectlArgs, "-y")
+	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	kubectlArgs := stripSkFlags(args)
 
 	if err := guardOp("scale", args); err != nil {
 		return err

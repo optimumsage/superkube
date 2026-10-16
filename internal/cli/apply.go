@@ -28,9 +28,8 @@ func runApply(cmd *cobra.Command, args []string) error {
 	if printHelpIfRequested(cmd, args) {
 		return nil
 	}
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	kubectlArgs := stripFlag(args, "--yes")
-	kubectlArgs = stripFlag(kubectlArgs, "-y")
+	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	kubectlArgs := stripSkFlags(args)
 
 	if err := guardOp("apply", args); err != nil {
 		return err
@@ -112,46 +111,49 @@ func confirmApply(yes bool) error {
 }
 
 // extractDryRun pulls --dry-run out of args and returns the normalized mode
-// (auto|none|server|client) plus the remaining args. Accepts `--dry-run=X`
-// and, since superkube's own root flag allows it, `--dry-run X`. A bare
-// `--dry-run` means client (kubectl's legacy meaning); true/false map to
-// client/none. Absent means auto (preview then confirm).
+// (auto|none|server|client) plus the remaining args. Like kubectl (NoOptDefVal
+// in pflag) a bare `--dry-run` means client and NEVER consumes the next token;
+// values need `--dry-run=X`. true/false map to client/none. When args carry no
+// --dry-run, superkube's own root flag value (Flags.DryRun, set from a leading
+// `--dry-run[=X]`) applies; absent means auto (preview then confirm).
 func extractDryRun(args []string) (mode string, rest []string, err error) {
-	mode = "auto"
 	rest = make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		a := args[i]
+	found := false
+	norm := func(val string) (string, error) {
+		switch strings.ToLower(val) {
+		case "auto", "none", "server", "client":
+			return strings.ToLower(val), nil
+		case "unchanged", "true":
+			return "client", nil
+		case "false":
+			return "none", nil
+		}
+		return "", fmt.Errorf("apply: invalid --dry-run value %q (want auto|none|server|client)", val)
+	}
+	mode = "auto"
+	for _, a := range args {
 		var val string
 		switch {
 		case a == "--dry-run":
 			val = "client"
-			if i+1 < len(args) && isDryRunValue(args[i+1]) {
-				val = args[i+1]
-				i++
-			}
 		case strings.HasPrefix(a, "--dry-run="):
 			val = strings.TrimPrefix(a, "--dry-run=")
 		default:
 			rest = append(rest, a)
 			continue
 		}
-		switch strings.ToLower(val) {
-		case "auto", "none", "server", "client":
-			mode = strings.ToLower(val)
-		case "unchanged", "true":
-			mode = "client"
-		case "false":
-			mode = "none"
-		default:
-			return "", nil, fmt.Errorf("apply: invalid --dry-run value %q (want auto|none|server|client)", val)
+		if mode, err = norm(val); err != nil {
+			return "", nil, err
+		}
+		found = true
+	}
+	if !found && Flags.DryRun != "" {
+		if mode, err = norm(Flags.DryRun); err != nil {
+			return "", nil, err
 		}
 	}
 	return mode, rest, nil
 }
-
-// isDryRunValue shares guardrail's rule (case-insensitive) so extractDryRun
-// and the argv scanners agree on when a bare --dry-run consumes a token.
-func isDryRunValue(s string) bool { return guardrail.IsDryRunValue(s) }
 
 // usesStdinManifest reports whether args direct kubectl to read a manifest
 // from stdin: `-f -`, `-f=-`, `-f-`, `--filename -`, `--filename=-`.

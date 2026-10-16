@@ -24,9 +24,8 @@ func runRollout(cmd *cobra.Command, args []string) error {
 	if printHelpIfRequested(cmd, args) {
 		return nil
 	}
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	kubectlArgs := stripFlag(args, "--yes")
-	kubectlArgs = stripFlag(kubectlArgs, "-y")
+	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	kubectlArgs := stripSkFlags(args)
 
 	// args may start with root flags (`sk --context prod rollout ...` leaves
 	// `--context prod` in front), so find the subcommand among positionals.
@@ -87,8 +86,12 @@ func confirmRollout(sub string, targets []string, fromSource, yes bool) error {
 			fmt.Sprintf("rollout undo %d workloads: %s", len(targets), list),
 			fmt.Sprintf("ROLLOUT-%d", len(targets)), yes)
 	}
+	prompt := "Rollout " + sub
+	if list != "" {
+		prompt += " " + list
+	}
 	return confirmYesNo(
-		strings.TrimSpace(fmt.Sprintf("Rollout %s %s?", sub, list)),
+		prompt+"?",
 		"This changes the running workload.",
 		"ROLLOUT",
 		yes,

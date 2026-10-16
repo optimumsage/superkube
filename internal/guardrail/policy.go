@@ -83,13 +83,11 @@ func EffectivePolicy(cfg *config.Config, currentContext string) Policy {
 // MatchedPattern/Banner (falling back to the first candidate that has one).
 // Used when argv scanning can't prove which context kubectl will really use.
 func EffectivePolicyFor(cfg *config.Config, contexts []string) Policy {
-	var out Policy
-	for i, c := range contexts {
+	// Start from the context-independent policy so the global
+	// guardrails.require_typed_confirm survives even with no candidates.
+	out := EffectivePolicy(cfg, "")
+	for _, c := range contexts {
 		p := EffectivePolicy(cfg, c)
-		if i == 0 {
-			out = p
-			continue
-		}
 		out.RequireTypedConfirm = out.RequireTypedConfirm || p.RequireTypedConfirm
 		out.Forbidden = append(out.Forbidden, p.Forbidden...)
 		if out.MatchedPattern == "" {
@@ -185,8 +183,8 @@ func (p Policy) IsForbidden(verb string, args []string) (rule string, blocked bo
 }
 
 // token is one comparable unit of an argv or a forbid rule. Flags compare by
-// canonical long name, so `-n x`, `-n=x`, `-nx`, `--namespace x` and
-// `--namespace=x` are all the same association.
+// canonical long name, so `-n x`, `-n=x`, `-nx`, `-An x` and `--namespace x`
+// all give the same association, and `-A` equals `--all-namespaces`.
 type token struct {
 	word   string // set for positionals
 	flag   string // canonical flag name; empty for positionals
@@ -197,16 +195,21 @@ type token struct {
 func ruleTokens(fields []string) []token {
 	var out []token
 	for i := 0; i < len(fields); i++ {
-		if f, ok := FlagAt(fields, i); ok {
-			t := token{flag: f.Name, val: f.Val, hasVal: f.HasVal}
-			if f.UsesNext {
-				t.val, t.hasVal = fields[i+1], true
-				i++
-			}
-			out = append(out, t)
+		fs, ok := FlagsAt(fields, i)
+		if !ok {
+			out = append(out, token{word: normalizeWord(fields[i])})
 			continue
 		}
-		out = append(out, token{word: fields[i]})
+		for j, f := range fs {
+			t := token{flag: f.Name, val: f.Val, hasVal: f.HasVal}
+			if j == len(fs)-1 && f.UsesNext {
+				t.val, t.hasVal = fields[i+1], true
+			}
+			out = append(out, t)
+		}
+		if fs[len(fs)-1].UsesNext {
+			i++
+		}
 	}
 	return out
 }
@@ -224,26 +227,39 @@ func (t tokenSet) has(req token) bool {
 		}
 		return t.flags[req.flag]
 	}
-	return t.words[req.word] || t.words[normalizeKind(req.word)]
+	return t.words[req.word]
+}
+
+// normalizeWord maps a positional to its canonical comparable form: a bare
+// kind is normalized (`ns` -> `namespace`), `kind/name` has only the kind
+// normalized (`pods.v1/x.y` -> `pod/x.y`; names keep their dots).
+func normalizeWord(w string) string {
+	if kind, name, ok := strings.Cut(w, "/"); ok {
+		return normalizeKind(kind) + "/" + name
+	}
+	return normalizeKind(w)
 }
 
 // argTokens indexes args for rule matching. Values of value-taking flags are
 // recorded only as flag=value associations, never as words, so
 // `--field-manager namespace` cannot trip a "delete namespace" rule. Unknown
-// flags are treated as booleans, so whatever follows stays a word
-// (fail-closed). Everything after a bare `--` is positional.
+// flags are booleans, so whatever follows stays a word (fail-closed). `--dry-run`
+// and `--cascade` never take the next token. Everything after a bare `--` is
+// positional. `TYPE a b` also yields TYPE/a and TYPE/b so a `kind/name` rule
+// matches either spelling.
 func argTokens(args []string) tokenSet {
 	t := tokenSet{flags: map[string]bool{}, assoc: map[string]bool{}, words: map[string]bool{}}
+	var positionals []string
 	addWord := func(a string) {
+		positionals = append(positionals, a)
 		for _, part := range strings.Split(a, ",") {
 			t.words[part] = true
+			t.words[normalizeWord(part)] = true
 			if kind, name, ok := strings.Cut(part, "/"); ok {
 				t.words[kind] = true
 				t.words[normalizeKind(kind)] = true
 				t.words[name] = true
-				continue
 			}
-			t.words[normalizeKind(part)] = true
 		}
 	}
 	for i := 0; i < len(args); i++ {
@@ -253,19 +269,32 @@ func argTokens(args []string) tokenSet {
 			}
 			break
 		}
-		f, ok := FlagAt(args, i)
+		fs, ok := FlagsAt(args, i)
 		if !ok {
 			addWord(args[i])
 			continue
 		}
-		t.flags[f.Name] = true
-		val, has := f.Val, f.HasVal
-		if f.UsesNext {
-			val, has = args[i+1], true
+		for j, f := range fs {
+			t.flags[f.Name] = true
+			val, has := f.Val, f.HasVal
+			if j == len(fs)-1 && f.UsesNext {
+				val, has = args[i+1], true
+			}
+			if has {
+				t.assoc[f.Name+"="+val] = true
+			}
+		}
+		if fs[len(fs)-1].UsesNext {
 			i++
 		}
-		if has {
-			t.assoc[f.Name+"="+val] = true
+	}
+	if len(positionals) >= 2 && !strings.Contains(positionals[0], "/") {
+		for _, kind := range strings.Split(positionals[0], ",") {
+			for _, names := range positionals[1:] {
+				for _, name := range strings.Split(names, ",") {
+					t.words[normalizeKind(kind)+"/"+name] = true
+				}
+			}
 		}
 	}
 	return t

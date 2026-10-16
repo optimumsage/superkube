@@ -77,10 +77,17 @@ func TestPerVerbValueFlagsBeforeVerbStillGuarded(t *testing.T) {
 	h = newHarness(t, forbidProd)
 	h.refused("--timeout", "30s", "--context", "prod", "drain", "node1", "--yes")
 
-	// Still runs normally on dev.
+	// Ambiguous leading flags are refused with guidance, even on dev.
 	h = newHarness(t, forbidProd)
-	if code, _ := h.run("", "-l", "app=web", "delete", "pods", "--yes"); code != 0 || !strings.Contains(h.callLog(), "delete") {
-		t.Errorf("dev: code=%d calls=%q", code, h.callLog())
+	if code, stderr := h.run("", "-l", "app=web", "delete", "pods", "--yes"); code != 1 ||
+		!strings.Contains(stderr, "put command flags after the verb") || h.callLog() != "" {
+		t.Errorf("dev: code=%d stderr=%q calls=%q", code, stderr, h.callLog())
+	}
+	// ...and the same flags after the verb work.
+	h = newHarness(t, forbidProd)
+	if code, _ := h.run("", "delete", "pods", "-l", "app=web", "--yes"); code != 0 ||
+		!strings.Contains(h.callLog(), "delete pods -l app=web") {
+		t.Errorf("after verb: code=%d calls=%q", code, h.callLog())
 	}
 
 	if v, i, _ := firstVerbAt([]string{"-o", "pod", "get", "deploy/x"}); v != "get" || i != 2 {
@@ -106,7 +113,9 @@ func TestKubectlVerbosityFlag(t *testing.T) {
 		{"--v=8", "top", "pods"},
 	} {
 		h := newHarness(t, "")
-		if code, stderr := h.run("", argv...); code != 0 || !strings.Contains(h.callLog(), "--v=8 top pods") {
+		// Passthrough forwards the user's argv verbatim (only cobra's view is
+		// normalized).
+		if code, stderr := h.run("", argv...); code != 0 || strings.TrimSpace(h.callLog()) != strings.Join(argv, " ") {
 			t.Errorf("%v: code=%d calls=%q stderr=%q", argv, code, h.callLog(), stderr)
 		}
 	}

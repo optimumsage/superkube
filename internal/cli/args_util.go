@@ -154,57 +154,65 @@ func firstPositional(args []string) string {
 	return ""
 }
 
+// flagSpan returns how many argv tokens the flag token at args[i] occupies
+// (1, or 2 when its value is the next token). ok is false for positionals.
+func flagSpan(args []string, i int) (n int, ok bool) {
+	_, n, ok = parseTok(args, i, false)
+	return n, ok
+}
+
 // positionalArgs returns the slice of args that are neither flags nor flag
 // values. Used to find the kubectl resource type and name(s). Flag/value
-// pairing comes from the shared guardrail.FlagAt table, so
-// `delete -n prod pod x` yields [pod x] and `-nprod`, `-fx.yaml`, `-lapp=x`
-// contribute nothing. Tokens after a bare `--` are all positional.
+// pairing and short-cluster parsing (`-Rf dir`, `-An ns`) come from the shared
+// guardrail.FlagsAt table. Tokens after a bare `--` are all positional.
+// Callers must check the length before indexing the result.
 func positionalArgs(args []string) []string {
 	var out []string
-	for i := 0; i < len(args); i++ {
+	for i := 0; i < len(args); {
 		if args[i] == "--" {
 			out = append(out, args[i+1:]...)
 			break
 		}
-		f, ok := guardrail.FlagAt(args, i)
+		n, ok := flagSpan(args, i)
 		if !ok {
 			out = append(out, args[i])
-			continue
+			n = 1
 		}
-		if f.UsesNext {
-			i++
-		}
+		i += n
 	}
 	return out
 }
 
 // hasSource reports whether args select resources from a manifest, kustomize
-// dir or selector (-f/-k/-l and long forms, including attached `-fx.yaml`)
-// rather than by name.
+// dir or selector (-f/-k/-l and long forms, including attached `-fx.yaml` and
+// clusters like `-Rf dir`) rather than by name.
 func hasSource(args []string) bool {
-	for i := 0; i < len(args); i++ {
+	for i := 0; i < len(args); {
 		if args[i] == "--" {
 			return false
 		}
-		f, ok := guardrail.FlagAt(args, i)
+		fs, ok := guardrail.FlagsAt(args, i)
 		if !ok {
+			i++
 			continue
 		}
-		switch f.Name {
-		case "filename", "kustomize", "selector", "field-selector":
-			return true
+		for _, f := range fs {
+			switch f.Name {
+			case "filename", "kustomize", "selector", "field-selector":
+				return true
+			}
 		}
-		if f.UsesNext {
-			i++
-		}
+		n, _ := flagSpan(args, i)
+		i += n
 	}
 	return false
 }
 
 // splitTargets turns positionals into (type, names). Supports `TYPE NAME...`
 // and the all-`TYPE/NAME` form (type is then empty and each name keeps its
-// kind prefix). Comma lists (`pod/a,pod/b`, `pod a,b`) are split so the
-// confirmation counts every target kubectl will touch.
+// kind prefix). Comma lists are split so the confirmation counts every target
+// kubectl will touch: `pod/a,pod/b`, `pod a,b`, and comma kinds
+// (`pod,svc app` = pod/app and svc/app, returned with an empty type).
 func splitTargets(positionals []string) (resourceType string, names []string) {
 	if len(positionals) == 0 {
 		return "", nil
@@ -220,12 +228,75 @@ func splitTargets(positionals []string) (resourceType string, names []string) {
 	if !allSlashed {
 		resourceType, rest = positionals[0], positionals[1:]
 	}
+	var flat []string
 	for _, p := range rest {
 		for _, n := range strings.Split(p, ",") {
 			if n != "" {
-				names = append(names, n)
+				flat = append(flat, n)
 			}
 		}
 	}
-	return resourceType, names
+	if kinds := strings.Split(resourceType, ","); len(kinds) > 1 {
+		for _, k := range kinds {
+			for _, n := range flat {
+				names = append(names, k+"/"+n)
+			}
+		}
+		return "", names
+	}
+	return resourceType, flat
+}
+
+// boolFlag reports whether a boolean flag (any of names, e.g. "--yes", "-y")
+// is set in args. `--yes=false`/`=0` mean false; the last occurrence wins.
+func boolFlag(args []string, names ...string) bool {
+	set := false
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		for _, n := range names {
+			switch {
+			case a == n:
+				set = true
+			case strings.HasPrefix(a, n+"="):
+				switch strings.ToLower(strings.TrimPrefix(a, n+"=")) {
+				case "false", "0", "f", "no":
+					set = false
+				default:
+					set = true
+				}
+			}
+		}
+	}
+	return set
+}
+
+// stripSkFlags removes superkube-only flags so they are never forwarded to
+// kubectl (which would reject them): --yes/-y, --plain, --audit X,
+// --ai-timeout X, --no-context, --tools, in both `--x v` and `--x=v` forms.
+// Every DisableFlagParsing command that shells out uses this one helper.
+func stripSkFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			return append(out, args[i:]...)
+		}
+		name, _, hasEq := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		long := strings.HasPrefix(a, "--")
+		switch {
+		case a == "-y":
+			continue
+		case long && (name == "yes" || name == "plain" || name == "no-context" || name == "tools"):
+			continue
+		case long && (name == "audit" || name == "ai-timeout"):
+			if !hasEq && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }

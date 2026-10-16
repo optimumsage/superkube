@@ -26,9 +26,8 @@ func runDrain(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return errors.New("drain: NODE name required")
 	}
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	kubectlArgs := stripFlag(args, "--yes")
-	kubectlArgs = stripFlag(kubectlArgs, "-y")
+	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	kubectlArgs := stripSkFlags(args)
 
 	if err := guardOp("drain", args); err != nil {
 		return err
@@ -71,9 +70,8 @@ func runCordon(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return errors.New("cordon: NODE name required")
 	}
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	kubectlArgs := stripFlag(args, "--yes")
-	kubectlArgs = stripFlag(kubectlArgs, "-y")
+	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	kubectlArgs := stripSkFlags(args)
 
 	if err := guardOp("cordon", args); err != nil {
 		return err
