@@ -64,6 +64,11 @@ type Options struct {
 
 	// Repo overrides the default repo. For tests.
 	Repo string
+
+	// SkipChecksum installs even when checksums.txt (or the entry for our
+	// asset) is missing. UNSAFE: the tarball is then unauthenticated. A
+	// checksum that is present but does not match always aborts.
+	SkipChecksum bool
 }
 
 func (o Options) repo() string {
@@ -159,12 +164,17 @@ func Run(ctx context.Context, p *Plan, opt Options, progress func(string)) error
 
 	progress("verifying checksum")
 	if err := verifyAgainstChecksumsURL(ctx, opt.HTTPClient, p.ChecksumURL, tarPath, p.AssetName); err != nil {
-		// Snapshot / pre-release builds may not publish checksums. Mirror
-		// install.sh's "best-effort" behavior: warn, but continue.
-		if !errors.Is(err, errNoChecksumPublished) {
+		// A missing checksums.txt / entry is a hard error: installing an
+		// unverified binary over the running one is not something to do
+		// silently. --skip-checksum is the explicit escape hatch (e.g. for
+		// snapshot builds). Mismatches and fetch errors are never skippable.
+		if !(opt.SkipChecksum && errors.Is(err, errNoChecksumPublished)) {
+			if errors.Is(err, errNoChecksumPublished) {
+				return fmt.Errorf("checksum verification: %w for %s (re-run with --skip-checksum to install unverified; UNSAFE)", err, p.AssetName)
+			}
 			return fmt.Errorf("checksum verification: %w", err)
 		}
-		progress("warning: no checksums.txt published — skipping verification")
+		progress("warning: no checksum available — installing UNVERIFIED binary (--skip-checksum)")
 	}
 
 	progress("extracting")

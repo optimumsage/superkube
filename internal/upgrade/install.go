@@ -52,7 +52,8 @@ func download(ctx context.Context, h httpDoer, url, dest string) error {
 // verifyAgainstChecksumsURL fetches the checksums.txt for the release and
 // compares the entry for assetName against the sha256 of file. Returns
 // errNoChecksumPublished if the checksum file itself is absent (release just
-// missing the artifact) so callers can downgrade to a warning.
+// missing the artifact) or lists no entry for assetName; callers treat that as
+// fatal unless the user passed --skip-checksum.
 func verifyAgainstChecksumsURL(ctx context.Context, h httpDoer, url, file, assetName string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -75,8 +76,7 @@ func verifyAgainstChecksumsURL(ctx context.Context, h httpDoer, url, file, asset
 		return err
 	}
 	if expected == "" {
-		// File present but doesn't list our asset. install.sh treats this as
-		// a warning, not an error.
+		// File present but doesn't list our asset.
 		return errNoChecksumPublished
 	}
 	actual, err := sha256File(file)

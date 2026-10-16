@@ -167,11 +167,71 @@ func TestCheckLatest_EmptyCurrentVersionAlwaysProceeds(t *testing.T) {
 	}
 }
 
-// TestRun_EndToEnd_NoChecksum exercises Run with a fake httpDoer that serves
-// a synthetic tarball and a 404 for checksums.txt. Verifies the missing
-// checksum is treated as a warning, the binary lands on disk, and progress
-// callbacks fire.
-func TestRun_EndToEnd_NoChecksum(t *testing.T) {
+// TestRun_NoChecksum_Aborts: a release without checksums.txt must NOT be
+// installed unless the caller explicitly opts out with SkipChecksum.
+func TestRun_NoChecksum_Aborts(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "superkube")
+	if err := os.WriteFile(target, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := &routingDoer{routes: map[string]routedResponse{
+		"https://github.com/foo/bar/releases/download/v0.3.0/superkube_0.3.0_linux_amd64.tar.gz": {
+			status: 200, body: buildTarball(t, "superkube", []byte("new")),
+		},
+		"https://github.com/foo/bar/releases/download/v0.3.0/checksums.txt": {status: 404},
+	}}
+	plan := &Plan{
+		TargetVersion: "v0.3.0", OS: "linux", Arch: "amd64",
+		AssetName:   "superkube_0.3.0_linux_amd64.tar.gz",
+		AssetURL:    "https://github.com/foo/bar/releases/download/v0.3.0/superkube_0.3.0_linux_amd64.tar.gz",
+		ChecksumURL: "https://github.com/foo/bar/releases/download/v0.3.0/checksums.txt",
+		BinaryPath:  target,
+	}
+	err := Run(context.Background(), plan, Options{HTTPClient: f}, nil)
+	if err == nil || !errors.Is(err, errNoChecksumPublished) {
+		t.Fatalf("expected errNoChecksumPublished, got %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "OLD" {
+		t.Errorf("binary was replaced despite missing checksum: %q", got)
+	}
+}
+
+// TestRun_MissingChecksumEntry_Aborts: checksums.txt exists but has no line
+// for our asset.
+func TestRun_MissingChecksumEntry_Aborts(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "superkube")
+	if err := os.WriteFile(target, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := &routingDoer{routes: map[string]routedResponse{
+		"https://github.com/foo/bar/releases/download/v0.3.0/superkube_0.3.0_linux_amd64.tar.gz": {
+			status: 200, body: buildTarball(t, "superkube", []byte("new")),
+		},
+		"https://github.com/foo/bar/releases/download/v0.3.0/checksums.txt": {
+			status: 200, body: []byte(strings.Repeat("a", 64) + "  some_other_asset.tar.gz\n"),
+		},
+	}}
+	plan := &Plan{
+		TargetVersion: "v0.3.0", OS: "linux", Arch: "amd64",
+		AssetName:   "superkube_0.3.0_linux_amd64.tar.gz",
+		AssetURL:    "https://github.com/foo/bar/releases/download/v0.3.0/superkube_0.3.0_linux_amd64.tar.gz",
+		ChecksumURL: "https://github.com/foo/bar/releases/download/v0.3.0/checksums.txt",
+		BinaryPath:  target,
+	}
+	if err := Run(context.Background(), plan, Options{HTTPClient: f}, nil); err == nil {
+		t.Fatal("expected error for missing checksum entry")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "OLD" {
+		t.Errorf("binary was replaced: %q", got)
+	}
+}
+
+// TestRun_EndToEnd_SkipChecksum exercises Run with SkipChecksum against a
+// fake httpDoer that serves a synthetic tarball and a 404 for checksums.txt.
+// Verifies the binary lands on disk and progress callbacks fire.
+func TestRun_EndToEnd_SkipChecksum(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "superkube")
 	if err := os.WriteFile(target, []byte("OLD"), 0o755); err != nil {
@@ -202,7 +262,7 @@ func TestRun_EndToEnd_NoChecksum(t *testing.T) {
 	}
 
 	var progressLog []string
-	err := Run(context.Background(), plan, Options{HTTPClient: f}, func(s string) {
+	err := Run(context.Background(), plan, Options{HTTPClient: f, SkipChecksum: true}, func(s string) {
 		progressLog = append(progressLog, s)
 	})
 	if err != nil {
