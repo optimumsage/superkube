@@ -1,8 +1,10 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -72,5 +74,48 @@ func TestConfigPutRejectsUnknownKeys(t *testing.T) {
 		if rr := e.doMethod(t, "PUT", "/api/v1/config", mustJSONStr(map[string]string{"yaml": y})); rr.Code != http.StatusBadRequest {
 			t.Errorf("%s: code %d, want 400", name, rr.Code)
 		}
+	}
+}
+
+func TestConfigInitForceNeedsTypedConfirm(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	path := config.ConfigFile()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const orig = "contexts:\n  \"*\":\n    forbid: [\"delete\"]\n"
+	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := newHardenEnv(t, hardenOpts{})
+	rr := e.do(t, "/api/v1/config/init?force=1", "")
+	r := decode[previewResp](t, rr)
+	if rr.Code != 200 || r.Status != "needs_confirmation" {
+		t.Fatalf("first call: %d %s", rr.Code, rr.Body.String())
+	}
+	if b, _ := os.ReadFile(path); string(b) != orig {
+		t.Fatal("config overwritten before confirmation")
+	}
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &tok)
+	if rr = e.do(t, "/api/v1/config/init?force=1", `{"confirm_token":"`+tok.Token+`","confirm_value":"wrong"}`); rr.Code != http.StatusGone {
+		t.Fatalf("wrong phrase: %d", rr.Code)
+	}
+	rr = e.do(t, "/api/v1/config/init?force=1", "")
+	_ = json.Unmarshal(rr.Body.Bytes(), &tok)
+	if rr = e.do(t, "/api/v1/config/init?force=1", `{"confirm_token":"`+tok.Token+`","confirm_value":"EDIT CONFIG"}`); rr.Code != 200 {
+		t.Fatalf("confirmed: %d %s", rr.Code, rr.Body.String())
+	}
+	if b, _ := os.ReadFile(path); string(b) == orig {
+		t.Fatal("config not overwritten after confirmation")
+	}
+	found := false
+	for _, ev := range e.events {
+		found = found || ev.Verb == "config-init"
+	}
+	if !found {
+		t.Error("config-init not audited")
 	}
 }

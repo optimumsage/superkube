@@ -126,9 +126,41 @@ func (s *Server) apiConfigPut(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiConfigInit(w http.ResponseWriter, r *http.Request) {
 	path := config.ConfigFile()
 	force := r.URL.Query().Get("force") == "1"
-	if _, err := os.Stat(path); err == nil && !force {
-		s.render.Error(w, http.StatusConflict, "config already exists; pass force=1 to overwrite")
-		return
+	if _, err := os.Stat(path); err == nil {
+		if !force {
+			s.render.Error(w, http.StatusConflict, "config already exists; pass force=1 to overwrite")
+			return
+		}
+		// Overwriting wipes the guardrail forbid rules: same typed
+		// confirmation as a PUT.
+		var body struct {
+			ConfirmToken string `json:"confirm_token"`
+			ConfirmValue string `json:"confirm_value"`
+		}
+		if r.ContentLength != 0 {
+			_ = s.decodeJSON(w, r, &body)
+		}
+		sess := s.readSession(r)
+		digest := digestOf("config-init", path)
+		if body.ConfirmToken == "" {
+			bannerText, bannerKind := s.bannerFor(sess)
+			tok := s.pty.Issue(ptyConfirmEntry{
+				Verb: "config-init", Context: sess.Context, Resource: "config.yaml",
+				Expect: configEditPhrase, Digest: digest,
+			})
+			s.render.JSON(w, http.StatusOK, confirmationResponse{
+				Status: "needs_confirmation", Style: "typed_phrase",
+				Prompt: "Type " + configEditPhrase + " to overwrite config.yaml with the defaults",
+				Detail: "This discards every existing forbid rule.",
+				Expect: configEditPhrase, Token: tok, TTLSeconds: 30,
+				BannerText: bannerText, BannerKind: bannerKind,
+			})
+			return
+		}
+		if _, ok := s.pty.Consume(body.ConfirmToken, body.ConfirmValue, "config-init", sess.Context, digest); !ok {
+			s.render.Error(w, http.StatusGone, "confirmation expired or did not match")
+			return
+		}
 	}
 	if err := os.MkdirAll(dirOf(path), 0o700); err != nil {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
