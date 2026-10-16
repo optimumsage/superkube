@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func writeCfg(t *testing.T, body string) string {
+func writeCfg(t *testing.T, body string) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
@@ -18,7 +18,7 @@ func writeCfg(t *testing.T, body string) string {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return path
+
 }
 
 func TestLoadMissingFileIsFine(t *testing.T) {
@@ -80,6 +80,16 @@ func TestLoadBadTimeoutAndProvider(t *testing.T) {
 	writeCfg(t, "ai:\n  provider: gpt\n")
 	if _, err := Load(); err == nil {
 		t.Error("want error for unknown ai.provider")
+	}
+}
+
+func TestParseStrict(t *testing.T) {
+	if _, err := Parse([]byte("forbids: [x]")); err == nil {
+		t.Error("Parse must reject unknown keys")
+	}
+	c, err := Parse([]byte("contexts:\n  a:\n    forbid: [delete]\n"))
+	if err != nil || len(c.Contexts["a"].Forbid) != 1 {
+		t.Errorf("Parse = %+v, %v", c, err)
 	}
 }
 

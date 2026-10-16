@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/optimumsage/superkube/internal/guardrail"
 )
 
 // wantsHelp returns true if args contains a help flag in any common form.
@@ -153,90 +155,77 @@ func firstPositional(args []string) string {
 }
 
 // positionalArgs returns the slice of args that are neither flags nor flag
-// values. Used to find the kubectl resource type and name(s). Value-taking
-// flags written as `--name value` (kubectl's global flags plus the common
-// per-verb ones, see valueFlags) have their value skipped so
-// `delete -n prod pod x` yields [pod x], not [prod pod x].
+// values. Used to find the kubectl resource type and name(s). Flag/value
+// pairing comes from the shared guardrail.FlagAt table, so
+// `delete -n prod pod x` yields [pod x] and `-nprod`, `-fx.yaml`, `-lapp=x`
+// contribute nothing. Tokens after a bare `--` are all positional.
 func positionalArgs(args []string) []string {
 	var out []string
 	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if !strings.HasPrefix(a, "-") || a == "-" {
-			out = append(out, a)
+		if args[i] == "--" {
+			out = append(out, args[i+1:]...)
+			break
+		}
+		f, ok := guardrail.FlagAt(args, i)
+		if !ok {
+			out = append(out, args[i])
 			continue
 		}
-		if flagConsumesNext(args, i, valueFlags) {
+		if f.UsesNext {
 			i++
 		}
 	}
 	return out
 }
 
-// flagConsumesNext reports whether args[i] (a flag token) takes args[i+1] as
-// its value according to the given flag-name set. `--name=value` forms never
-// do. `-v`/`--v` is ambiguous: kubectl's is a verbosity level (`-v 8`) while
-// superkube's own `-v` is the boolean --verbose; we treat the next token as
-// the value only when it is numeric, which no verb or resource name ever is.
-func flagConsumesNext(args []string, i int, set map[string]bool) bool {
-	a := args[i]
-	if strings.Contains(a, "=") || i+1 >= len(args) {
-		return false
-	}
-	if a == "-v" || a == "--v" {
-		return isNumeric(args[i+1])
-	}
-	return set[strings.TrimLeft(a, "-")]
-}
-
-func isNumeric(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
+// hasSource reports whether args select resources from a manifest, kustomize
+// dir or selector (-f/-k/-l and long forms, including attached `-fx.yaml`)
+// rather than by name.
+func hasSource(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
 			return false
 		}
+		f, ok := guardrail.FlagAt(args, i)
+		if !ok {
+			continue
+		}
+		switch f.Name {
+		case "filename", "kustomize", "selector", "field-selector":
+			return true
+		}
+		if f.UsesNext {
+			i++
+		}
 	}
-	return true
+	return false
 }
 
-// globalValueFlags are the flags (without leading dashes) that take a
-// separate value and are accepted before the verb: superkube's own root flags
-// plus every value-taking kubectl global flag (see `kubectl options`).
-// Bool globals (--insecure-skip-tls-verify, --match-server-version,
-// --warnings-as-errors, --disable-compression) are deliberately absent.
-// -v/--v is handled specially in flagConsumesNext.
-var globalValueFlags = map[string]bool{
-	// superkube
-	"ai": true, "dry-run": true, "audit": true, "ai-timeout": true,
-	// kubectl
-	"as": true, "as-group": true, "as-uid": true, "cache-dir": true,
-	"certificate-authority": true, "client-certificate": true, "client-key": true,
-	"cluster": true, "context": true, "kubeconfig": true,
-	"n": true, "namespace": true, "request-timeout": true,
-	"s": true, "server": true, "tls-server-name": true, "token": true,
-	"user": true, "username": true, "password": true,
-	"log-file": true, "log-flush-frequency": true, "vmodule": true,
-	"profile": true, "profile-output": true,
+// splitTargets turns positionals into (type, names). Supports `TYPE NAME...`
+// and the all-`TYPE/NAME` form (type is then empty and each name keeps its
+// kind prefix). Comma lists (`pod/a,pod/b`, `pod a,b`) are split so the
+// confirmation counts every target kubectl will touch.
+func splitTargets(positionals []string) (resourceType string, names []string) {
+	if len(positionals) == 0 {
+		return "", nil
+	}
+	allSlashed := true
+	for _, p := range positionals {
+		if !strings.Contains(p, "/") {
+			allSlashed = false
+			break
+		}
+	}
+	rest := positionals
+	if !allSlashed {
+		resourceType, rest = positionals[0], positionals[1:]
+	}
+	for _, p := range rest {
+		for _, n := range strings.Split(p, ",") {
+			if n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	return resourceType, names
 }
-
-// valueFlags extends globalValueFlags with the per-verb flags that commonly
-// appear in guarded commands (delete, scale, rollout, drain, apply, ...) and
-// take a separate value. Used only to pick resource names out of argv.
-var valueFlags = func() map[string]bool {
-	m := map[string]bool{}
-	for k := range globalValueFlags {
-		m[k] = true
-	}
-	for _, k := range []string{
-		"f", "filename", "k", "kustomize", "l", "selector", "field-selector",
-		"o", "output", "c", "container", "replicas", "current-replicas",
-		"resource-version", "to-revision", "grace-period", "timeout", "cascade",
-		"field-manager", "pod-selector", "chunk-size", "template", "for",
-		"label-columns", "sort-by", "prune-allowlist", "subresource",
-		"skip-wait-for-delete-timeout",
-	} {
-		m[k] = true
-	}
-	return m
-}()

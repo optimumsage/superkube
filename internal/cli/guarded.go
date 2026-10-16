@@ -5,6 +5,7 @@ import (
 
 	"github.com/optimumsage/superkube/internal/config"
 	"github.com/optimumsage/superkube/internal/guardrail"
+	"github.com/optimumsage/superkube/internal/ui"
 )
 
 // promptYesNo is guardrail.YesNo behind a variable so tests can simulate a user
@@ -45,15 +46,43 @@ func confirmYesNo(prompt, detail, phrase string, yes bool) error {
 	return promptYesNo(prompt, detail, yes)
 }
 
-// readOnlyVerbs are kubectl verbs that never mutate cluster state. They keep
-// working when config.yaml is broken (with the warning); every other
-// passthrough verb — including unknown krew plugins — fails closed.
+// readOnlyVerbs are kubectl verbs that never mutate cluster state whatever
+// their subcommand. They keep working when config.yaml is broken (with the
+// warning).
 var readOnlyVerbs = map[string]bool{
 	"get": true, "describe": true, "logs": true, "top": true, "explain": true,
-	"api-resources": true, "api-versions": true, "version": true, "config": true,
+	"api-resources": true, "api-versions": true, "version": true,
 	"cluster-info": true, "completion": true, "events": true, "options": true,
-	"help": true, "diff": true, "wait": true, "auth": true, "plugin": true,
-	"kustomize": true,
+	"help": true, "diff": true, "wait": true, "kustomize": true,
+}
+
+// readOnlySubs lists, for verbs that mix reads and writes, the subcommands
+// that are read-only. Anything not listed (including unknown subcommands and
+// krew plugins) is treated as mutating and fails closed.
+var readOnlySubs = map[string]map[string]bool{
+	"auth":    {"can-i": true, "whoami": true},
+	"config":  {"view": true, "get-contexts": true, "get-clusters": true, "get-users": true, "current-context": true},
+	"rollout": {"status": true, "history": true},
+	"plugin":  {"list": true},
+}
+
+// readOnlyOp classifies verb+args (args as given to sk, verb included or not).
+func readOnlyOp(verb string, args []string) bool {
+	if readOnlyVerbs[verb] {
+		return true
+	}
+	subs, ok := readOnlySubs[verb]
+	if !ok {
+		return false
+	}
+	pos := positionalArgs(args)
+	for i, p := range pos {
+		if p == verb {
+			pos = pos[i+1:]
+			break
+		}
+	}
+	return len(pos) > 0 && subs[pos[0]]
 }
 
 // guardPassthrough applies the forbid policy to verbs superkube has no
@@ -62,7 +91,7 @@ var readOnlyVerbs = map[string]bool{
 // added — passthrough stays verbatim — only forbid rules (and the broken
 // config fail-closed rule) apply.
 func guardPassthrough(verb string, args []string) error {
-	if configErr != nil && !readOnlyVerbs[verb] {
+	if configErr != nil && !readOnlyOp(verb, args) {
 		return requireValidConfig(verb)
 	}
 	if rule, blocked := Policy().IsForbidden(verb, args); blocked {
@@ -70,4 +99,55 @@ func guardPassthrough(verb string, args []string) error {
 			verb, rule, Policy().MatchedPattern)
 	}
 	return nil
+}
+
+// guardedVerbs are the verbs sk guards itself; seeing one of them as a token
+// of a command routed to plain passthrough means argv scanning and the user
+// disagree about what the verb is.
+var guardedVerbs = []string{"delete", "apply", "scale", "rollout", "drain", "cordon"}
+
+// backstopGuard is the fail-closed net under verb routing. If a command is
+// going to passthrough but any token before `--` (other than the routed verb)
+// equals a guarded verb, the forbid rules of that verb are enforced anyway,
+// and a non-read-only command without --yes is refused in non-interactive
+// contexts. It can false-positive (e.g. a pod named "delete"); that costs
+// one --yes, whereas a misroute would skip every guardrail.
+func backstopGuard(verb string, verbIdx int, args []string) error {
+	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
+	for i, a := range args {
+		if a == "--" {
+			break
+		}
+		if i == verbIdx {
+			continue
+		}
+		for _, g := range guardedVerbs {
+			if a != g {
+				continue
+			}
+			if err := requireValidConfig(g); err != nil {
+				return err
+			}
+			if rule, blocked := Policy().IsForbidden(g, args); blocked {
+				return fmt.Errorf("%s refused by policy %q for context matching %q",
+					g, rule, Policy().MatchedPattern)
+			}
+			if !yes && !readOnlyOp(verb, args) && !ui.IsStdinTTY() {
+				return fmt.Errorf("ambiguous command line: %q may be the guarded verb %q but was routed as %q; refused non-interactively, pass --yes to run it anyway",
+					a, g, verb)
+			}
+		}
+	}
+	return nil
+}
+
+// showPassthroughBanner prints the context banner for passthrough commands,
+// which skip cobra's PersistentPreRun. Only on a stderr terminal so piped
+// stderr stays clean.
+func showPassthroughBanner(stderrTTY bool) {
+	if !stderrTTY {
+		return
+	}
+	ui.Init(Flags.Plain)
+	showContextBanner()
 }

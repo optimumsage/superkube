@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/optimumsage/superkube/internal/audit"
@@ -55,7 +56,12 @@ func Execute(args []string) int {
 	// Kubeconfig for them. Pre-parse those from raw argv — before routing —
 	// so policy resolution, the banner and the audit row all see the context
 	// the command will really run against. argv itself is left untouched.
-	applyScannedFlags(scanGlobalFlags(args))
+	args = normalizeVerbosity(args)
+	sf := scanGlobalFlags(args)
+	applyScannedFlags(sf)
+	// Policy is resolved over every context that COULD apply (fail-closed),
+	// not just the scanner's best guess; see policyContexts.
+	argvCands = scanCandidates(args, sf)
 	loadPolicy()
 
 	// If the first positional token is an unknown verb, route to passthrough so
@@ -78,7 +84,12 @@ func Execute(args []string) int {
 
 	if hasVerb && !isKnownCommand(root, verb) {
 		var code int
-		if err := guardPassthrough(verb, args); err != nil {
+		showPassthroughBanner(isatty.IsTerminal(os.Stderr.Fd()))
+		err := guardPassthrough(verb, args)
+		if err == nil {
+			err = backstopGuard(verb, verbIdx, args)
+		}
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			code = 1
 		} else {
@@ -88,6 +99,14 @@ func Execute(args []string) int {
 		return code
 	}
 
+	// Put the verb first so cobra's own (flag-agnostic) subcommand search
+	// agrees with firstVerbAt; leading flags simply follow the verb, which is
+	// where DisableFlagParsing commands see them anyway.
+	auditArgs := args
+	if hasVerb && verbIdx > 0 && args[verbIdx-1] != "--" {
+		reordered := append([]string{args[verbIdx]}, args[:verbIdx]...)
+		args = append(reordered, args[verbIdx+1:]...)
+	}
 	root.SetArgs(args)
 	err := root.ExecuteContext(rootContext())
 	code := 0
@@ -95,7 +114,7 @@ func Execute(args []string) int {
 		code = handleExecuteErr(err)
 	}
 	if hasVerb {
-		recordAudit(verb, args, code, time.Since(start))
+		recordAudit(verb, auditArgs, code, time.Since(start))
 	}
 	return code
 }
@@ -175,6 +194,12 @@ func NewRootCmd() *cobra.Command {
 	f.StringVar(&Flags.Context, "context", "", "kubeconfig context to use")
 	f.StringVarP(&Flags.Namespace, "namespace", "n", "", "namespace to use")
 	f.StringVar(&Flags.Kubeconfig, "kubeconfig", "", "path to kubeconfig file")
+	// kubectl's --v=N verbosity. The long name "v" is distinct from the -v
+	// shorthand of --verbose in pflag. Execute rewrites `-v 8`/`-v8` to
+	// `--v=8` first, so the number is never read as a command; enhanced
+	// commands (DisableFlagParsing) forward it to kubectl untouched.
+	f.String("v", "", "kubectl log verbosity (forwarded to kubectl)")
+	_ = f.MarkHidden("v")
 	f.StringVar(&Flags.AIProvider, "ai", "", "AI provider: claude|antigravity (auto-detect by default)")
 	f.BoolVar(&Flags.Yes, "yes", false, "skip confirmation prompts (use with care)")
 	f.StringVar(&Flags.DryRun, "dry-run", "auto", "dry-run mode: auto|server|client|none")
@@ -286,13 +311,11 @@ func loadPolicy() {
 	activeCfg = cfg
 	applyConfigDefaults(cfg)
 
-	current := Flags.Context
-	if current == "" {
-		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig}
-		current, _ = loader.CurrentContext()
-	}
-	activePolicy = guardrail.EffectivePolicy(cfg, current)
+	activePolicy = guardrail.EffectivePolicyFor(cfg, policyContexts(argvCands))
 }
+
+// argvCands is the raw-argv override candidate set for this invocation.
+var argvCands argvCandidates
 
 // applyConfigDefaults feeds config.yaml's ai.* settings in as defaults. An
 // explicit --ai / --ai-timeout (parsed by cobra after this runs and so
@@ -405,15 +428,13 @@ var errSilentFail = errors.New("silent failure")
 // (cobra vs passthrough) and the audit verb. Passthrough always receives the
 // full argv unchanged so kubectl-global flags survive.
 //
-// Value-taking flags (superkube's own plus all of kubectl's global ones, see
-// globalValueFlags) consume their value so it is never mistaken for the verb:
-// `sk --as admin --context prod delete pod x` routes to delete, not "admin".
-// Any other unknown flag is treated as boolean (consume one token) so that
-// kubectl-only boolean flags don't eat the verb.
-//
-// `-v`/`--v` conflict: kubectl's is a verbosity level (`-v 8`, `--v=8`),
-// superkube's `-v` is the boolean --verbose. We take a following numeric token
-// as the value and otherwise treat it as boolean; verbs are never numeric.
+// Flag/value pairing comes from the single shared table in
+// guardrail.FlagAt (superkube's flags, kubectl's globals and the per-verb
+// value flags), so `sk --as admin --context prod -l app=x delete pod x`
+// routes to delete, not "admin". Unknown flags are treated as boolean.
+// --dry-run and --cascade only take the next token when it is a valid value
+// (a bare `--dry-run` is legal), and `-v`/`--v` take it only when numeric:
+// kubectl's is a verbosity level, superkube's `-v` the boolean --verbose.
 func firstVerb(args []string) (verb string, ok bool) {
 	v, _, found := firstVerbAt(args)
 	return v, found
@@ -433,12 +454,11 @@ func firstVerbAt(args []string) (verb string, idx int, ok bool) {
 			}
 			return "", 0, false
 		}
-		if strings.HasPrefix(a, "-") && a != "-" {
-			if flagConsumesNext(args, i, globalValueFlags) {
-				i += 2
-				continue
-			}
+		if f, isFlag := guardrail.FlagAt(args, i); isFlag {
 			i++
+			if f.UsesNext {
+				i++
+			}
 			continue
 		}
 		return a, i, true
@@ -452,44 +472,122 @@ type scannedFlags struct {
 	Kubeconfig string
 	Namespace  string
 	Audit      string
+	AI         string
+	AITimeout  time.Duration
+	Yes        bool
+	Plain      bool
 }
 
-// scanGlobalFlags extracts --context, --kubeconfig, -n/--namespace and --audit
-// from raw argv, in `--x=v` and `--x v` forms, anywhere (before or after the
-// verb), last occurrence wins. Scanning stops at a bare `--` (what follows is
-// a command for exec/debug, not our flags). Values of other value-taking
-// flags are skipped so `--as -n` can't be misread. The argv is not modified.
+// scanGlobalFlags extracts the root flags from raw argv, in `--x=v` and
+// `--x v` forms, anywhere (before or after the verb), last occurrence wins.
+// Needed because DisableFlagParsing commands never let cobra fill Flags, and
+// so that explicit flags beat config.yaml defaults for them too. Scanning
+// stops at a bare `--`. `--ai` is only honored BEFORE the verb: after it,
+// `logs --ai` is a boolean owned by that command. Note single-dash tokens are
+// shorthand clusters, so `-context=prod` is not a context override. The argv
+// is not modified. Best guess only: policy uses scanCandidates (fail-closed).
 func scanGlobalFlags(args []string) scannedFlags {
 	var sf scannedFlags
+	_, verbIdx, hasVerb := firstVerbAt(args)
 	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
+		if args[i] == "--" {
 			break
 		}
-		if !strings.HasPrefix(a, "-") || a == "-" {
+		f, ok := guardrail.FlagAt(args, i)
+		if !ok {
 			continue
 		}
-		name, val, hasEq := strings.Cut(strings.TrimLeft(a, "-"), "=")
-		if !hasEq && flagConsumesNext(args, i, globalValueFlags) {
+		val := f.Val
+		if f.UsesNext {
 			val = args[i+1]
 			i++
 		}
-		switch name {
+		switch f.Name {
 		case "context":
 			sf.Context = val
 		case "kubeconfig":
 			sf.Kubeconfig = val
-		case "namespace", "n":
+		case "namespace":
 			sf.Namespace = val
 		case "audit":
 			sf.Audit = val
+		case "ai":
+			if hasVerb && i < verbIdx {
+				sf.AI = val
+			}
+		case "ai-timeout":
+			if d, err := time.ParseDuration(val); err == nil && d > 0 {
+				sf.AITimeout = d
+			}
+		case "yes":
+			sf.Yes = !f.HasVal || val == "true"
+		case "plain":
+			sf.Plain = !f.HasVal || val == "true"
 		}
 	}
 	return sf
 }
 
+// argvCandidates lists every value that COULD be a context/kubeconfig
+// override anywhere before a bare `--`, without trusting flag/value pairing
+// (a `--context=dev` token may really be the value of `--field-manager`).
+type argvCandidates struct {
+	contexts, kubeconfigs               []string
+	ambiguousContext, ambiguousKubeconf bool
+}
+
+func scanCandidates(args []string, sf scannedFlags) argvCandidates {
+	var c argvCandidates
+	raw := func(name string) (vals []string, empty bool) {
+		for i, a := range args {
+			if a == "--" {
+				break
+			}
+			var v string
+			switch {
+			case strings.HasPrefix(a, "--"+name+"="):
+				v = strings.TrimPrefix(a, "--"+name+"=")
+			case a == "--"+name:
+				if i+1 < len(args) {
+					v = args[i+1]
+				}
+			default:
+				continue
+			}
+			if v == "" {
+				empty = true
+			}
+			vals = append(vals, v)
+		}
+		return vals, empty
+	}
+	ambiguous := func(vals []string, empty bool, walked string) bool {
+		d := distinct(vals)
+		return empty || len(d) > 1 || (len(d) == 1 && d[0] != walked)
+	}
+	cv, ce := raw("context")
+	c.contexts = distinct(cv)
+	c.ambiguousContext = ambiguous(cv, ce, sf.Context)
+	kv, ke := raw("kubeconfig")
+	c.kubeconfigs = distinct(kv)
+	c.ambiguousKubeconf = ambiguous(kv, ke, sf.Kubeconfig)
+	return c
+}
+
+func distinct(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range in {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // applyScannedFlags copies scanned values into Flags without clobbering
-// anything with an empty string.
+// anything with an empty value.
 func applyScannedFlags(sf scannedFlags) {
 	if sf.Context != "" {
 		Flags.Context = sf.Context
@@ -503,6 +601,83 @@ func applyScannedFlags(sf scannedFlags) {
 	if sf.Audit != "" {
 		Flags.Audit = sf.Audit
 	}
+	if sf.AI != "" {
+		Flags.AIProvider = sf.AI
+	}
+	if sf.AITimeout > 0 {
+		Flags.AITimeout = sf.AITimeout
+	}
+	if sf.Yes {
+		Flags.Yes = true
+	}
+	if sf.Plain {
+		Flags.Plain = true
+	}
+}
+
+// currentContextOf returns the kubeconfig's current-context ("" on error).
+func currentContextOf(kubeconfig string) string {
+	loader := kube.Loader{KubeconfigPath: kubeconfig}
+	c, _ := loader.CurrentContext()
+	return c
+}
+
+// policyContexts returns the candidate contexts policy must be evaluated
+// against, best guess first. When the scan can't prove which context kubectl
+// will use (several or unpaired --context tokens, or no override at all) the
+// kubeconfig current-context(s) join the set, and policy is the union: a
+// forbid in ANY candidate blocks.
+func policyContexts(c argvCandidates) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	best := Flags.Context
+	if best == "" {
+		best = currentContextOf(Flags.Kubeconfig)
+	}
+	add(best)
+	for _, s := range c.contexts {
+		add(s)
+	}
+	if Flags.Context == "" || c.ambiguousContext {
+		kcs := distinct(append(append([]string(nil), c.kubeconfigs...), Flags.Kubeconfig))
+		if len(kcs) == 0 || c.ambiguousKubeconf || Flags.Kubeconfig == "" {
+			kcs = append(kcs, "") // default kubeconfig resolution
+		}
+		for _, kc := range kcs {
+			add(currentContextOf(kc))
+		}
+	}
+	return out
+}
+
+// normalizeVerbosity rewrites kubectl's verbosity forms (`-v 8`, `-v8`,
+// `-v=8`, `--v 8`) to `--v=8` so cobra never mistakes the number for a
+// command. A bare `-v` stays superkube's boolean --verbose.
+func normalizeVerbosity(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			return append(out, args[i:]...)
+		}
+		f, ok := guardrail.FlagAt(args, i)
+		if !ok || f.Name != "v" || (!f.UsesNext && !f.HasVal) {
+			out = append(out, args[i])
+			continue
+		}
+		val := f.Val
+		if f.UsesNext {
+			val = args[i+1]
+			i++
+		}
+		out = append(out, "--v="+val)
+	}
+	return out
 }
 
 // isKnownCommand reports whether name is a direct subcommand of root. The

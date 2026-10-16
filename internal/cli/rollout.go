@@ -35,40 +35,31 @@ func runRollout(cmd *cobra.Command, args []string) error {
 		return errors.New("rollout: subcommand required (status|history|restart|undo|pause|resume)")
 	}
 	sub, rest := positionals[0], positionals[1:]
-	mutating := sub == "restart" || sub == "undo" || sub == "pause" || sub == "resume"
 
-	if mutating {
-		if err := guardOp("rollout", args); err != nil {
-			return err
+	// Only status/history are read-only; unknown subcommands are treated as
+	// mutating so they fail closed on a broken config.
+	readOnly := sub == "status" || sub == "history"
+	if readOnly {
+		if rule, blocked := Policy().IsForbidden("rollout", args); blocked {
+			return fmt.Errorf("rollout refused by policy %q for context matching %q",
+				rule, Policy().MatchedPattern)
 		}
-	} else if rule, blocked := Policy().IsForbidden("rollout", args); blocked {
-		return fmt.Errorf("rollout refused by policy %q for context matching %q",
-			rule, Policy().MatchedPattern)
+	} else if err := guardOp("rollout", args); err != nil {
+		return err
 	}
 
-	if mutating {
-		target := rolloutTarget(rest)
+	if sub == "restart" || sub == "undo" || sub == "pause" || sub == "resume" {
+		kind, names := splitTargets(rest)
+		var targets []string
+		for _, n := range names {
+			if kind != "" { // `TYPE a b` -> TYPE/a TYPE/b
+				n = kind + "/" + n
+			}
+			targets = append(targets, n)
+		}
 		ReshowBanner()
-		if sub == "undo" {
-			if target == "" {
-				return errors.New("rollout undo: workload required (e.g. deployment/foo)")
-			}
-			if err := guardrail.TypedName(
-				fmt.Sprintf("rollout undo %s", target),
-				target,
-				yes,
-			); err != nil {
-				return err
-			}
-		} else {
-			if err := confirmYesNo(
-				strings.TrimSpace(fmt.Sprintf("Rollout %s %s?", sub, target)),
-				"This changes the running workload.",
-				"ROLLOUT",
-				yes,
-			); err != nil {
-				return err
-			}
+		if err := confirmRollout(sub, targets, hasSource(kubectlArgs), yes); err != nil {
+			return err
 		}
 	}
 
@@ -79,15 +70,27 @@ func runRollout(cmd *cobra.Command, args []string) error {
 	return runner.Run(cmd.Context(), append([]string{"rollout"}, kubectlArgs...), kubectl.RunOpts{})
 }
 
-// rolloutTarget names the workload from the positionals after the rollout
-// subcommand: `deploy/x` stays as is; `deployment x` becomes `deployment/x`.
-func rolloutTarget(rest []string) string {
+// confirmRollout gates restart/pause/resume (yes/no) and undo (typed). Every
+// target kubectl will touch is counted: several targets need the phrase
+// ROLLOUT-N, a manifest/selector source needs ROLLOUT.
+func confirmRollout(sub string, targets []string, fromSource, yes bool) error {
+	list := strings.Join(targets, ", ")
 	switch {
-	case len(rest) == 0:
-		return ""
-	case len(rest) >= 2 && !strings.Contains(rest[0], "/"):
-		return rest[0] + "/" + rest[1]
-	default:
-		return rest[0]
+	case sub == "undo" && fromSource:
+		return guardrail.TypedPhrase("rollout undo from a manifest/selector", "ROLLOUT", yes)
+	case sub == "undo" && len(targets) == 0:
+		return errors.New("rollout undo: workload required (e.g. deployment/foo)")
+	case sub == "undo" && len(targets) == 1:
+		return guardrail.TypedName("rollout undo "+targets[0], targets[0], yes)
+	case sub == "undo":
+		return guardrail.TypedPhrase(
+			fmt.Sprintf("rollout undo %d workloads: %s", len(targets), list),
+			fmt.Sprintf("ROLLOUT-%d", len(targets)), yes)
 	}
+	return confirmYesNo(
+		strings.TrimSpace(fmt.Sprintf("Rollout %s %s?", sub, list)),
+		"This changes the running workload.",
+		"ROLLOUT",
+		yes,
+	)
 }

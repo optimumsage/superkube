@@ -149,13 +149,9 @@ func extractDryRun(args []string) (mode string, rest []string, err error) {
 	return mode, rest, nil
 }
 
-func isDryRunValue(s string) bool {
-	switch s {
-	case "auto", "none", "server", "client", "unchanged", "true", "false":
-		return true
-	}
-	return false
-}
+// isDryRunValue shares guardrail's rule (case-insensitive) so extractDryRun
+// and the argv scanners agree on when a bare --dry-run consumes a token.
+func isDryRunValue(s string) bool { return guardrail.IsDryRunValue(s) }
 
 // usesStdinManifest reports whether args direct kubectl to read a manifest
 // from stdin: `-f -`, `-f=-`, `-f-`, `--filename -`, `--filename=-`.

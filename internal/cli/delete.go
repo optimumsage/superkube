@@ -47,10 +47,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	positionals := positionalArgs(kubectlArgs)
 	// Selector/manifest-driven deletes name no resource we could ask the user
 	// to type, e.g. `delete -f x.yaml` or `delete pods -l app=x`.
-	fromSource := hasFlag(kubectlArgs, "-f") || hasFlag(kubectlArgs, "--filename") ||
-		hasFlag(kubectlArgs, "-k") || hasFlag(kubectlArgs, "--kustomize") ||
-		hasFlag(kubectlArgs, "-l") || hasFlag(kubectlArgs, "--selector") ||
-		hasFlag(kubectlArgs, "--field-selector")
+	fromSource := hasSource(kubectlArgs)
 	switch {
 	case all:
 		// `delete --all` is the highest-risk variant. Refuse without both --yes
@@ -65,7 +62,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		); err != nil {
 			return err
 		}
-	case fromSource && len(positionals) < 2:
+	case fromSource:
 		if err := guardrail.TypedPhrase(
 			fmt.Sprintf("about to: kubectl delete %s", strings.Join(kubectlArgs, " ")),
 			"DELETE",
@@ -75,7 +72,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		}
 	default:
 		// positionals look like: [TYPE NAME [NAME...]] or [TYPE/NAME ...].
-		resourceType, names := splitDeleteTargets(positionals)
+		resourceType, names := splitTargets(positionals)
 		if len(names) == 0 {
 			return errors.New("delete: need TYPE and at least one NAME (or --all)")
 		}
@@ -106,26 +103,6 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return runner.Run(cmd.Context(), append([]string{"delete"}, kubectlArgs...), kubectl.RunOpts{})
-}
-
-// splitDeleteTargets turns delete's positionals into (type, names). Supports
-// `TYPE NAME...` and the all-`TYPE/NAME` form (type is then empty and each
-// name keeps its kind prefix, which is what the user types to confirm).
-func splitDeleteTargets(positionals []string) (resourceType string, names []string) {
-	if len(positionals) == 0 {
-		return "", nil
-	}
-	allSlashed := true
-	for _, p := range positionals {
-		if !strings.Contains(p, "/") {
-			allSlashed = false
-			break
-		}
-	}
-	if allSlashed {
-		return "", positionals
-	}
-	return positionals[0], positionals[1:]
 }
 
 const deleteLongHelp = `Delete resources with typed-name confirmation.

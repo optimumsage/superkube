@@ -54,7 +54,7 @@ func runResourceView(cmd *cobra.Command, args []string, kind string) error {
 	if len(args) == 0 || firstPositional(args) == "" {
 		return fmt.Errorf("%s view: NAME is required", kind)
 	}
-	runner, err := kubectl.Default()
+	runner, err := kubectl.New()
 	if err != nil {
 		return err
 	}
@@ -77,7 +77,7 @@ func runResourceEdit(cmd *cobra.Command, args []string, kind string) error {
 	if err := guardOp("edit", append([]string{kind}, args...)); err != nil {
 		return err
 	}
-	runner, err := kubectl.Default()
+	runner, err := kubectl.New()
 	if err != nil {
 		return err
 	}
