@@ -20,12 +20,13 @@ type textProducer func(ctx context.Context, w io.Writer) error
 // channel; the tea event loop drains it via waitChunk() so we never call
 // tea.Program from outside.
 type textPane struct {
+	id    uint64 // see paneSeq
 	title string
 	kind  textKind // for the small badge in the header
 
-	body strings.Builder
-	// rendered is the body split into lines for filter + viewport math. We
-	// rebuild it on every chunk; cheap for kilobyte-scale outputs.
+	// lines is the body split for filter + viewport math. The last element is
+	// the (possibly incomplete) line still being written; chunks are appended
+	// incrementally rather than re-splitting the whole body.
 	lines    []string
 	filter   string
 	filterOn bool
@@ -54,11 +55,18 @@ const (
 	textKindWhy
 )
 
-type textChunkMsg struct{ s string }
-type textEndMsg struct{ err error }
+type textChunkMsg struct {
+	id uint64
+	s  string
+}
+type textEndMsg struct {
+	id  uint64
+	err error
+}
 
 func newTextPane(title string, kind textKind) *textPane {
 	return &textPane{
+		id:      paneSeq.Add(1),
 		title:   title,
 		kind:    kind,
 		chunkCh: make(chan string, 64),
@@ -87,14 +95,14 @@ func (t *textPane) waitChunk() tea.Cmd {
 		if !ok {
 			return nil
 		}
-		return textChunkMsg{s: s}
+		return textChunkMsg{id: t.id, s: s}
 	}
 }
 
 func (t *textPane) waitDone() tea.Cmd {
 	return func() tea.Msg {
 		err := <-t.doneCh
-		return textEndMsg{err: err}
+		return textEndMsg{id: t.id, err: err}
 	}
 }
 
@@ -105,10 +113,13 @@ func (t *textPane) stop() {
 }
 
 func (t *textPane) appendChunk(s string) {
-	t.body.WriteString(s)
 	t.bytes += len(s)
-	// Re-split. Cheap; outputs are kilobytes, not megabytes.
-	t.lines = strings.Split(t.body.String(), "\n")
+	if len(t.lines) == 0 {
+		t.lines = []string{""}
+	}
+	parts := strings.Split(s, "\n")
+	t.lines[len(t.lines)-1] += parts[0]
+	t.lines = append(t.lines, parts[1:]...)
 }
 
 // filteredLines returns the lines that match the current filter. Empty filter
@@ -117,10 +128,10 @@ func (t *textPane) filteredLines() []string {
 	if t.filter == "" {
 		return t.lines
 	}
-	q := strings.ToLower(t.filter)
+	re := foldRegexp(t.filter)
 	out := make([]string, 0, len(t.lines))
 	for _, l := range t.lines {
-		if strings.Contains(strings.ToLower(l), q) {
+		if re.MatchString(l) {
 			out = append(out, l)
 		}
 	}

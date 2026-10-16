@@ -215,24 +215,23 @@ func paintRow(line string, spans []columnSpan, painters []cellColorizer) string 
 }
 
 // renderGetTable is the colorized writer for kubectl's plain text get output.
-// Returns the number of physical lines emitted (used by the watcher for its
-// cursor-up redraw math). The header is wrapped with ui.HeaderBg; data rows
-// have their known columns repainted in-place.
+// The header is wrapped with ui.HeaderBg; data rows have their known columns
+// repainted in-place.
 //
 // `kubectl get pods,svc` emits multiple sub-tables separated by a blank line,
 // each with its own header — we re-detect spans on every header-shaped line
 // that follows a blank or starts the input, so the second sub-table doesn't
 // get sliced by the first sub-table's column offsets.
-func renderGetTable(w io.Writer, raw string) int {
+func renderGetTable(w io.Writer, raw string) {
 	if raw == "" {
-		return 0
+		return
 	}
 	lines := strings.Split(raw, "\n")
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
 	if len(lines) == 0 {
-		return 0
+		return
 	}
 
 	var (
@@ -241,7 +240,6 @@ func renderGetTable(w io.Writer, raw string) int {
 		painters    []cellColorizer
 		kind        string
 		currentRows []string // captured for the summary footer
-		emitted     int
 	)
 	expectingHeader := true
 
@@ -249,7 +247,6 @@ func renderGetTable(w io.Writer, raw string) int {
 		if ui.Styled() && kind != "" && len(currentRows) > 0 {
 			if summary := summarizeRows(kind, names, spans, currentRows); summary != "" {
 				fmt.Fprintln(w, ui.Render(ui.Subtle, summary))
-				emitted++
 			}
 		}
 		currentRows = nil
@@ -270,7 +267,6 @@ func renderGetTable(w io.Writer, raw string) int {
 			flushSummary()
 			resetTable()
 			fmt.Fprintln(w, line)
-			emitted++
 			continue
 		}
 		if expectingHeader && looksLikeGetHeader(line) {
@@ -285,7 +281,6 @@ func renderGetTable(w io.Writer, raw string) int {
 				painters[i] = colorizerFor(s.name, kind)
 			}
 			fmt.Fprintln(w, ui.Render(ui.HeaderBg, line))
-			emitted++
 			expectingHeader = false
 			continue
 		}
@@ -299,10 +294,8 @@ func renderGetTable(w io.Writer, raw string) int {
 			// (warnings, deprecation notices, etc.).
 			fmt.Fprintln(w, line)
 		}
-		emitted++
 	}
 	flushSummary()
-	return emitted
 }
 
 // looksLikeGetHeader reports whether line is shaped like a kubectl table

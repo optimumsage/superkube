@@ -159,7 +159,7 @@ func splitResource(s string) (kind, name string) {
 
 func captureKubectl(ctx context.Context, runner *kubectl.Runner, args []string) (string, error) {
 	var stdout, stderr bytes.Buffer
-	err := runner.Run(ctx, args, kubectl.RunOpts{
+	err := runner.Run(ctx, kubectlGlobal(args), kubectl.RunOpts{
 		Stdout: &stdout,
 		Stderr: &stderr,
 	})
