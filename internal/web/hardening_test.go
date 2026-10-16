@@ -724,3 +724,38 @@ func TestCommitRejectsTokenMintedUnderWeakerPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestPaletteRejectsOverridesAndStreams(t *testing.T) {
+	e := newHardenEnv(t, hardenOpts{policy: func(string) (guardrail.Policy, error) {
+		return guardrail.Policy{Forbidden: []string{"get secret"}}, nil
+	}})
+	post := func(argv ...string) *httptest.ResponseRecorder {
+		return e.do(t, "/api/v1/passthrough", mustJSONStr(map[string]any{"argv": argv}))
+	}
+	for name, argv := range map[string][]string{
+		"kubeconfig":     {"get", "pods", "--kubeconfig=/x"},
+		"context":        {"get", "pods", "--context", "prod"},
+		"server":         {"get", "pods", "--server=https://x"},
+		"short server":   {"get", "pods", "-shttps://x"},
+		"token":          {"get", "pods", "--token=abc"},
+		"as":             {"get", "pods", "--as=root"},
+		"watch":          {"get", "pods", "-w"},
+		"watch long":     {"get", "pods", "--watch"},
+		"events watch":   {"events", "--watch"},
+		"leading flag":   {"--context=prod", "get", "pods"},
+		"forbidden rule": {"get", "secret"},
+	} {
+		if rr := post(argv...); rr.Code < 400 {
+			t.Errorf("%s: code %d, want rejection", name, rr.Code)
+		}
+	}
+	if rr := post("get", "secret"); rr.Code != http.StatusForbidden {
+		t.Errorf("forbid rule: code %d, want 403", rr.Code)
+	}
+	if rr := post("get", "pods", "-n", "kube-system", "-o", "wide"); rr.Code != http.StatusOK {
+		t.Errorf("benign read: code %d: %s", rr.Code, rr.Body.String())
+	}
+	if n := len(e.calls()); n != 1 {
+		t.Errorf("kubectl calls = %d, want only the benign one: %v", n, e.calls())
+	}
+}

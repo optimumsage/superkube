@@ -24,12 +24,27 @@ func (s *Server) apiPassthrough(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusBadRequest, "argv required")
 		return
 	}
+	if strings.HasPrefix(body.Argv[0], "-") {
+		s.render.Error(w, http.StatusBadRequest,
+			"put the verb first: flags before the verb (e.g. --context) are not accepted; use the context switcher instead")
+		return
+	}
+	if flag := paletteRejectedFlag(body.Argv); flag != "" {
+		s.render.Error(w, http.StatusBadRequest,
+			"flag "+flag+" is not allowed in the palette (connection overrides and streaming are rejected)")
+		return
+	}
 	if !palettePassthroughAllowed(body.Argv) {
 		s.render.Error(w, http.StatusForbidden,
 			"use the dedicated page for destructive verbs ("+strings.Join(body.Argv[:min(len(body.Argv), 2)], " ")+")")
 		return
 	}
 	sess := s.readSession(r)
+	// Policy applies to the palette exactly as to the dedicated pages, so a
+	// `forbid: ["get secret"]` rule cannot be sidestepped from Ctrl+K.
+	if s.gateForbidden(w, sess, body.Argv[0], body.Argv[1:]) {
+		return
+	}
 	args := sess.kubectlArgs(body.Argv)
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
@@ -80,6 +95,54 @@ func palettePassthroughAllowed(argv []string) bool {
 		return len(argv) >= 2 && (argv[1] == "can-i" || argv[1] == "whoami")
 	}
 	return false
+}
+
+// paletteConnFlags override which cluster / identity kubectl talks to. The
+// palette always runs against the session's pinned context, so none of them
+// may be supplied by the request.
+var paletteConnFlags = []string{
+	"--kubeconfig", "--context", "--server", "--token", "--user", "--cluster",
+	"--as", "--as-group", "--as-uid", "--certificate-authority", "--client-key",
+	"--client-certificate", "--insecure-skip-tls-verify", "--tls-server-name",
+	"--username", "--password", "--proxy-url", "--cache-dir",
+}
+
+// paletteStreamFlags would turn a one-shot read into a long-lived stream (or
+// read a local file), neither of which the buffered palette supports.
+var paletteStreamFlags = []string{"--watch", "--watch-only", "--follow", "--output-watch-events"}
+
+// paletteRejectedFlag returns the first offending flag in argv[1:], or "".
+// Everything after a bare "--" is positional data and is not inspected.
+func paletteRejectedFlag(argv []string) string {
+	stream := argv[0] != "diff" // diff legitimately takes -f <file>
+	for _, a := range argv[1:] {
+		if a == "--" {
+			return ""
+		}
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		for _, f := range paletteConnFlags {
+			if flagIs(a, f) {
+				return f
+			}
+		}
+		// -s (--server) shorthand, including glued forms like -shttps://x.
+		if !strings.HasPrefix(a, "--") && strings.HasPrefix(a, "-s") {
+			return "-s"
+		}
+		if stream {
+			for _, f := range paletteStreamFlags {
+				if flagIs(a, f) {
+					return f
+				}
+			}
+			if a == "-w" || strings.HasPrefix(a, "-w=") || a == "-f" || strings.HasPrefix(a, "-f=") {
+				return a[:2]
+			}
+		}
+	}
+	return ""
 }
 
 // flagIs reports whether arg is the named long flag, bare or with =value.
