@@ -887,10 +887,12 @@
         }
       },
       async save() {
-        const r = await fetch('/api/v1/config', { method: 'PUT', headers: csrfHeaders(), body: JSON.stringify({ yaml: this.yaml }) });
-        const d = await r.json();
-        this.status = r.ok ? 'saved' : ('error: ' + (d.error || 'unknown'));
-        if (r.ok) Alpine.$data(document.body).toast('Config saved', 'success');
+        // Rewriting config.yaml (guardrail forbid rules!) needs a typed phrase.
+        const d = await window.confirmThen('/api/v1/config', { yaml: this.yaml }, { method: 'PUT' });
+        if (!d) { this.status = 'save cancelled'; return; }
+        const ok = d.status === 'saved';
+        this.status = ok ? 'saved' : ('error: ' + (d.error || 'unknown'));
+        if (ok) Alpine.$data(document.body).toast('Config saved', 'success');
       },
     };
   };
