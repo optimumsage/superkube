@@ -666,3 +666,61 @@ func (l *lockedBuf) waitFor(t *testing.T, s string) {
 	}
 	t.Fatalf("timed out waiting for %q", s)
 }
+
+func TestApplyAndEditRequireTypedConfirmUnderPolicy(t *testing.T) {
+	typed := func(string) (guardrail.Policy, error) { return guardrail.Policy{RequireTypedConfirm: true}, nil }
+	e := newHardenEnv(t, hardenOpts{policy: typed})
+	y := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n  namespace: default\n"
+	type pv struct {
+		Status, Style, Expect, Token string
+		ConfirmToken                 string `json:"confirm_token"`
+	}
+	for _, c := range []struct{ prev, commit, expect string }{
+		{"/api/v1/apply/preview", "/api/v1/apply/commit", "APPLY"},
+		{"/api/v1/resources/configmaps/default/app/edit/preview", "/api/v1/resources/configmaps/default/app/edit/commit", "app"},
+	} {
+		body := mustJSONStr(map[string]string{"yaml": y})
+		p := decode[pv](t, e.do(t, c.prev, body))
+		if p.Expect != c.expect || p.Style != "typed_name" {
+			t.Fatalf("%s: preview %+v, want typed %q", c.prev, p, c.expect)
+		}
+		wrong := mustJSONStr(map[string]string{"yaml": y, "confirm_token": p.ConfirmToken, "confirm_value": "nope"})
+		if rr := e.do(t, c.commit, wrong); rr.Code != http.StatusGone {
+			t.Fatalf("%s: wrong typed value code %d", c.commit, rr.Code)
+		}
+		p = decode[pv](t, e.do(t, c.prev, body))
+		good := mustJSONStr(map[string]string{"yaml": y, "confirm_token": p.ConfirmToken, "confirm_value": c.expect})
+		if rr := e.do(t, c.commit, good); rr.Code != http.StatusOK {
+			t.Fatalf("%s: typed commit code %d: %s", c.commit, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestCommitRejectsTokenMintedUnderWeakerPolicy(t *testing.T) {
+	strict := false
+	pol := func(string) (guardrail.Policy, error) { return guardrail.Policy{RequireTypedConfirm: strict}, nil }
+	e := newHardenEnv(t, hardenOpts{policy: pol})
+	y := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n  namespace: default\n"
+	p := decode[struct {
+		ConfirmToken string `json:"confirm_token"`
+	}](t, e.do(t, "/api/v1/apply/preview", mustJSONStr(map[string]string{"yaml": y})))
+	strict = true
+	rr := e.do(t, "/api/v1/apply/commit", mustJSONStr(map[string]string{"yaml": y, "confirm_token": p.ConfirmToken}))
+	if rr.Code != http.StatusGone {
+		t.Fatalf("code %d, want 410", rr.Code)
+	}
+	// Destructive: yes/no token for scale-to-zero minted before strict mode.
+	strict = false
+	sb := `{"kind":"deploy","name":"web","replicas":0}`
+	t1 := decode[confirmationResponse](t, e.do(t, "/api/v1/destructive/scale", sb))
+	strict = true
+	rr = e.do(t, "/api/v1/destructive/scale", `{"kind":"deploy","name":"web","replicas":0,"confirm_token":"`+t1.Token+`","confirm_value":"web"}`)
+	if rr.Code != http.StatusGone {
+		t.Fatalf("scale code %d, want 410", rr.Code)
+	}
+	for _, c := range e.calls() {
+		if strings.HasPrefix(c, "apply") || strings.Contains(c, "scale") {
+			t.Fatalf("executed: %s", c)
+		}
+	}
+}

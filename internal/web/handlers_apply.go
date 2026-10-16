@@ -58,7 +58,12 @@ func (s *Server) applyForbidden(w http.ResponseWriter, sess session, yamlText st
 // issues a confirmation token bound to (verb, context, digest) that also
 // carries the previewed YAML as its Payload. The commit executes that stored
 // payload, never whatever the client resubmits.
-func (s *Server) previewYAML(w http.ResponseWriter, r *http.Request, sess session, verb, resource, digest, yamlText string) {
+func (s *Server) previewYAML(w http.ResponseWriter, r *http.Request, sess session, verb, resource, digest, yamlText, expectName string) {
+	pol, perr := s.policyFor(sess)
+	if perr != nil {
+		s.policyUnavailable(w, sess, perr)
+		return
+	}
 	tmp, cleanup, err := writeTempYAML(yamlText)
 	if err != nil {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
@@ -83,21 +88,31 @@ func (s *Server) previewYAML(w http.ResponseWriter, r *http.Request, sess sessio
 		return
 	}
 
+	// Typed confirmation under require_typed_confirm: the resource name for
+	// edit, the word APPLY for a free-form manifest.
+	style, expect := effectiveStyle(pol, "yes_no", expectName)
 	token := s.pty.Issue(ptyConfirmEntry{
 		Verb:     verb,
 		Context:  sess.Context,
 		Resource: resource,
 		Digest:   digest,
 		Payload:  yamlText,
+		Expect:   expect,
 	})
 
-	s.render.JSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"status":        "needs_confirmation",
 		"diff":          buf.String(),
 		"diff_html":     diffToHTML(buf.String()),
 		"confirm_token": token,
 		"ttl":           30,
-	})
+		"style":         style,
+	}
+	if expect != "" {
+		resp["expect"] = expect
+		resp["prompt"] = "Type " + expect + " to confirm."
+	}
+	s.render.JSON(w, http.StatusOK, resp)
 }
 
 // applyYAML writes payload to a fresh tmp file (the preview's may have been
@@ -135,7 +150,7 @@ func (s *Server) apiApplyPreview(w http.ResponseWriter, r *http.Request) {
 	if s.applyForbidden(w, sess, body.YAML) {
 		return
 	}
-	s.previewYAML(w, r, sess, "apply", "manifest", yamlDigest(sess, "apply", "", body.YAML), body.YAML)
+	s.previewYAML(w, r, sess, "apply", "manifest", yamlDigest(sess, "apply", "", body.YAML), body.YAML, "APPLY")
 }
 
 // apiApplyCommit consumes the token from apiApplyPreview and runs the real
@@ -144,8 +159,9 @@ func (s *Server) apiApplyPreview(w http.ResponseWriter, r *http.Request) {
 // session context may have changed since the preview).
 func (s *Server) apiApplyCommit(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		YAML  string `json:"yaml"`
-		Token string `json:"confirm_token"`
+		YAML         string `json:"yaml"`
+		Token        string `json:"confirm_token"`
+		ConfirmValue string `json:"confirm_value"`
 	}
 	if err := s.decodeJSON(w, r, &body); err != nil {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
@@ -155,7 +171,7 @@ func (s *Server) apiApplyCommit(w http.ResponseWriter, r *http.Request) {
 	if s.applyForbidden(w, sess, body.YAML) {
 		return
 	}
-	entry, ok := s.consumePreview(w, sess, body.Token, "", "apply", yamlDigest(sess, "apply", "", body.YAML))
+	entry, ok := s.consumePreview(w, sess, body.Token, body.ConfirmValue, "apply", yamlDigest(sess, "apply", "", body.YAML))
 	if !ok {
 		return
 	}

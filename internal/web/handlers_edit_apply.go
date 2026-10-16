@@ -104,6 +104,7 @@ type editBody struct {
 	Form         json.RawMessage `json:"form"`
 	OriginalYAML string          `json:"original_yaml"`
 	Token        string          `json:"confirm_token"`
+	ConfirmValue string          `json:"confirm_value"`
 }
 
 // editYAML resolves the manifest text from either text mode (`yaml`) or form
@@ -174,7 +175,7 @@ func (s *Server) apiResourceEditPreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	target := kind + "/" + ns + "/" + name
-	s.previewYAML(w, r, sess, "edit", target, yamlDigest(sess, "edit", target, yamlText), yamlText)
+	s.previewYAML(w, r, sess, "edit", target, yamlDigest(sess, "edit", target, yamlText), yamlText, name)
 }
 
 // apiResourceEditCommit consumes the token from apiResourceEditPreview and
@@ -209,7 +210,7 @@ func (s *Server) apiResourceEditCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := kind + "/" + ns + "/" + name
-	entry, ok := s.consumePreview(w, sess, body.Token, "", "edit", yamlDigest(sess, "edit", target, yamlText))
+	entry, ok := s.consumePreview(w, sess, body.Token, body.ConfirmValue, "edit", yamlDigest(sess, "edit", target, yamlText))
 	if !ok {
 		return
 	}

@@ -118,11 +118,18 @@ func (s *Server) gateConfirm(w http.ResponseWriter, sess session, op confirmOp, 
 	}
 	op = upgradeOp(pol, op)
 	if token != "" {
-		_, ok := s.pty.Consume(token, typed, op.Verb, sess.Context, op.Digest)
+		e, ok := s.pty.Consume(token, typed, op.Verb, sess.Context, op.Digest)
 		if !ok {
 			s.render.Error(w, http.StatusGone, "confirmation expired or did not match")
+			return false
 		}
-		return ok
+		// The policy may have tightened since the token was minted: a token
+		// issued for a yes/no prompt cannot satisfy a now-typed requirement.
+		if op.Expect != "" && e.Expect == "" {
+			s.render.Error(w, http.StatusGone, "policy now requires a typed confirmation; start again")
+			return false
+		}
+		return true
 	}
 	if s.deps.Yes && !op.NoSkip {
 		return true
@@ -147,6 +154,18 @@ func (s *Server) consumePreview(w http.ResponseWriter, sess session, token, type
 	e, ok := s.pty.Consume(token, typed, verb, sess.Context, digest)
 	if !ok {
 		s.render.Error(w, http.StatusGone, "confirmation expired or did not match the previewed operation")
+		return e, false
 	}
-	return e, ok
+	// Re-evaluate current policy for the snapshot context: reject tokens
+	// minted with a weaker style than is now required.
+	pol, err := s.policyFor(sess)
+	if err != nil {
+		s.policyUnavailable(w, sess, err)
+		return e, false
+	}
+	if pol.RequireTypedConfirm && e.Expect == "" {
+		s.render.Error(w, http.StatusGone, "policy now requires a typed confirmation; preview again")
+		return e, false
+	}
+	return e, true
 }

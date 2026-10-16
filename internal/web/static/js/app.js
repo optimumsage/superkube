@@ -426,7 +426,7 @@
       form: null,      // structured form payload (per-kind shape)
       originalYAML: '',
       yaml: '',        // textarea-mode buffer (yaml tab)
-      diff: '', applyOut: '', confirmToken: '',
+      diff: '', applyOut: '', confirmToken: '', confirmExpect: '',
       status: 'loading…', statusDetail: '',
       busy: false,
 
@@ -504,6 +504,7 @@
           if (d.status === 'no_changes') { this.status = 'no changes'; return; }
           this.diff = d.diff_html || d.diff || '';
           this.confirmToken = d.confirm_token || '';
+          this.confirmExpect = d.expect || '';
           this.status = 'review the diff, then confirm';
         } catch (e) {
           this.status = 'preview failed';
@@ -532,6 +533,7 @@
           if (d.status === 'no_changes') { this.status = 'no changes'; return; }
           this.diff = d.diff_html || d.diff || '';
           this.confirmToken = d.confirm_token || '';
+          this.confirmExpect = d.expect || '';
           this.status = 'review the diff, then confirm';
         } catch (e) {
           this.status = 'preview failed';
@@ -546,10 +548,16 @@
       // produced the diff.
       async commit() {
         if (!this.confirmToken) return;
+        // require_typed_confirm: the server sends the resource name to type.
+        let typed = '';
+        if (this.confirmExpect) {
+          typed = window.prompt('Type ' + this.confirmExpect + ' to confirm the edit', '');
+          if (typed == null) return;
+        }
         this.busy = true; this.applyOut = ''; this.statusDetail = '';
         const body = (this.tab === 'form')
-          ? { form: this.form, original_yaml: this.originalYAML, confirm_token: this.confirmToken }
-          : { yaml: this.yaml, confirm_token: this.confirmToken };
+          ? { form: this.form, original_yaml: this.originalYAML, confirm_token: this.confirmToken, confirm_value: typed }
+          : { yaml: this.yaml, confirm_token: this.confirmToken, confirm_value: typed };
         try {
           const r = await fetch('/api/v1/resources/' + this.kind + '/' + this.ns + '/' + this.name + '/edit/commit', {
             method: 'POST',
@@ -688,7 +696,7 @@
 
   window.ApplyPage = function () {
     return {
-      yaml: '', diff: '', status: '', applyOut: '', confirmToken: '', busy: false,
+      yaml: '', diff: '', status: '', applyOut: '', confirmToken: '', confirmExpect: '', busy: false,
       init() {},
       async preview() {
         if (!this.yaml.trim()) { this.status = 'paste a manifest first'; return; }
@@ -699,21 +707,27 @@
           if (d.status === 'no_changes') { this.status = 'no differences (cluster matches manifest)'; return; }
           this.diff = d.diff_html || '';
           this.confirmToken = d.confirm_token || '';
+          this.confirmExpect = d.expect || '';
           this.status = 'review the diff above, then confirm';
         } catch (e) { this.status = 'preview failed: ' + e; }
         finally { this.busy = false; }
       },
       async commit() {
+        let typed = '';
+        if (this.confirmExpect) {
+          typed = window.prompt('Type ' + this.confirmExpect + ' to confirm the apply', '');
+          if (typed == null) return;
+        }
         this.busy = true; this.applyOut = '';
         try {
-          const r = await fetch('/api/v1/apply/commit', { method: 'POST', headers: csrfHeaders(), body: JSON.stringify({ yaml: this.yaml, confirm_token: this.confirmToken }) });
+          const r = await fetch('/api/v1/apply/commit', { method: 'POST', headers: csrfHeaders(), body: JSON.stringify({ yaml: this.yaml, confirm_token: this.confirmToken, confirm_value: typed }) });
           const d = await r.json();
           this.applyOut = d.output || '';
           this.status = d.status === 'applied' ? 'applied' : 'apply failed';
         } catch (e) { this.status = 'apply failed: ' + e; }
         finally { this.busy = false; }
       },
-      reset() { this.diff = ''; this.applyOut = ''; this.confirmToken = ''; this.status = ''; },
+      reset() { this.diff = ''; this.applyOut = ''; this.confirmToken = ''; this.confirmExpect = ''; this.status = ''; },
     };
   };
 
