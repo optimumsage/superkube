@@ -101,7 +101,7 @@ func TestBlackBoxGetPaths(t *testing.T) {
 		_ = cmd.Run()
 		return h.callLog()
 	}
-	if got := run("--context", "dev", "get", "pods", "--plain"); !strings.Contains(got, "get pods") || strings.Contains(got, "--plain") {
+	if got := run("--context", "dev", "get", "pods", "--plain"); !strings.Contains(got, "get --context dev pods") || strings.Contains(got, "--plain") {
 		t.Errorf("get pods --plain: %q", got)
 	}
 	if got := run("-v", "8", "get", "pods"); !strings.Contains(got, "--v=8") {
@@ -110,7 +110,7 @@ func TestBlackBoxGetPaths(t *testing.T) {
 	if got := run("--plain", "--audit", "off", "--context", "dev", "get", "pods"); strings.Contains(got, "--plain") || strings.Contains(got, "--audit") {
 		t.Errorf("leading sk flags leaked: %q", got)
 	}
-	if got := run("--context", "dev", "get", "pods", "-o", "wide"); !strings.Contains(got, "pods -o wide") {
+	if got := run("--context", "dev", "get", "pods", "-o", "wide"); !strings.Contains(got, "pods -o wide") || !strings.Contains(got, "--context dev") {
 		t.Errorf("get -o wide: %q", got)
 	}
 }
