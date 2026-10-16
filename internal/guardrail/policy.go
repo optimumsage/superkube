@@ -169,7 +169,7 @@ func (p Policy) IsForbidden(verb string, args []string) (rule string, blocked bo
 			continue
 		}
 		allFound := true
-		for _, req := range ruleTokens(tokens[1:]) {
+		for _, req := range ruleTokens(verb, tokens[1:]) {
 			if !have.has(req) {
 				allFound = false
 				break
@@ -186,26 +186,36 @@ func (p Policy) IsForbidden(verb string, args []string) (rule string, blocked bo
 // canonical long name, so `-n x`, `-n=x`, `-nx`, `-An x` and `--namespace x`
 // all give the same association, and `-A` equals `--all-namespaces`.
 type token struct {
-	word   string // set for positionals
+	word   string // set for positionals (verbatim)
+	norm   string // kind-normalized alternative for type-shaped positionals
 	flag   string // canonical flag name; empty for positionals
 	val    string
 	hasVal bool
 }
 
-func ruleTokens(fields []string) []token {
+func ruleTokens(verb string, fields []string) []token {
 	var out []token
 	typeSeen := false
+	nameVerb := nameVerbs[verb]
 	for i := 0; i < len(fields); i++ {
 		fs, ok := FlagsAt(fields, i)
 		if !ok {
 			w := fields[i]
-			// The first positional (past a rollout-style subcommand) is the
-			// resource TYPE slot; later ones are NAMES and stay verbatim.
-			if !typeSeen && !rolloutSubs[w] {
+			t := token{word: w}
+			switch {
+			case nameVerb:
+				// Positionals are NAMES: verbatim only.
+			case strings.Contains(w, "/"):
+				// TYPE/NAME in any position: normalize the kind part.
 				typeSeen = true
-				w = normalizeTypeWord(w)
+				t.norm = normalizeTypeWord(w)
+			case !typeSeen && !rolloutSubs[w]:
+				// The first positional (past a rollout-style subcommand) is
+				// the resource TYPE slot; later ones are NAMES.
+				typeSeen = true
+				t.norm = normalizeTypeWord(w)
 			}
-			out = append(out, token{word: w})
+			out = append(out, t)
 			continue
 		}
 		for j, f := range fs {
@@ -222,10 +232,20 @@ func ruleTokens(fields []string) []token {
 	return out
 }
 
+// nameVerbs take NAMES (or non-resource words) as positionals, never a
+// resource TYPE, so their positionals are never kind-normalized.
+var nameVerbs = map[string]bool{
+	"drain": true, "cordon": true, "uncordon": true,
+	"config": true, "version": true, "cluster-info": true,
+	"api-resources": true, "api-versions": true, "completion": true,
+	"plugin": true, "kustomize": true,
+}
+
 type tokenSet struct {
 	flags map[string]bool // flag present, any value
 	assoc map[string]bool // "flag=value" associations
-	words map[string]bool // exact and normalized positionals
+	words map[string]bool // verbatim positionals, names, and raw types
+	norm  map[string]bool // kind-normalized types and TYPE/NAME forms
 }
 
 func (t tokenSet) has(req token) bool {
@@ -235,7 +255,7 @@ func (t tokenSet) has(req token) bool {
 		}
 		return t.flags[req.flag]
 	}
-	return t.words[req.word]
+	return t.words[req.word] || (req.norm != "" && t.norm[req.norm])
 }
 
 // normalizeTypeWord canonicalizes a resource-TYPE position: each
@@ -261,7 +281,7 @@ func normalizeTypeWord(w string) string {
 // positional. `TYPE a b` also yields TYPE/a and TYPE/b so a `kind/name` rule
 // matches either spelling.
 func argTokens(verb string, args []string) tokenSet {
-	t := tokenSet{flags: map[string]bool{}, assoc: map[string]bool{}, words: map[string]bool{}}
+	t := tokenSet{flags: map[string]bool{}, assoc: map[string]bool{}, words: map[string]bool{}, norm: map[string]bool{}}
 	var positionals []string
 	addWord := func(a string) { positionals = append(positionals, a) }
 	for i := 0; i < len(args); i++ {
@@ -290,35 +310,40 @@ func argTokens(verb string, args []string) tokenSet {
 			i++
 		}
 	}
-	// Every positional is a comparable word verbatim. Only resource-TYPE
-	// positions (the first positional past the verb and a rollout-style
-	// subcommand, and the kind of any TYPE/NAME) are also indexed in
-	// normalized form; names are never normalized.
+	// Every positional is a comparable word verbatim. For resource verbs the
+	// first positional (past the verb and a rollout-style subcommand) is a
+	// TYPE (possibly a comma list) and the rest are NAMES (possibly comma
+	// lists); any TYPE/NAME has its kind normalized. Names never normalize.
 	for _, a := range positionals {
 		t.words[a] = true
+	}
+	if nameVerbs[verb] {
+		return t
 	}
 	for len(positionals) > 0 && (positionals[0] == verb || rolloutSubs[positionals[0]]) {
 		positionals = positionals[1:]
 	}
-	for i, a := range positionals {
+	var kinds []string
+	if len(positionals) > 0 && !strings.Contains(positionals[0], "/") {
+		for _, part := range strings.Split(positionals[0], ",") {
+			t.words[part] = true
+			t.norm[normalizeKind(part)] = true
+			kinds = append(kinds, part)
+		}
+		positionals = positionals[1:]
+	}
+	for _, a := range positionals {
 		if kind, name, ok := strings.Cut(a, "/"); ok {
 			t.words[kind] = true
 			t.words[name] = true
-			t.words[normalizeKind(kind)] = true
-			t.words[normalizeKind(kind)+"/"+name] = true
-		} else if i == 0 {
-			for _, part := range strings.Split(a, ",") {
-				t.words[part] = true
-				t.words[normalizeKind(part)] = true
-			}
+			t.norm[normalizeKind(kind)] = true
+			t.norm[normalizeKind(kind)+"/"+name] = true
+			continue
 		}
-	}
-	if len(positionals) >= 2 && !strings.Contains(positionals[0], "/") {
-		for _, kind := range strings.Split(positionals[0], ",") {
-			for _, names := range positionals[1:] {
-				for _, name := range strings.Split(names, ",") {
-					t.words[normalizeKind(kind)+"/"+name] = true
-				}
+		for _, name := range strings.Split(a, ",") {
+			t.words[name] = true
+			for _, kind := range kinds {
+				t.norm[normalizeKind(kind)+"/"+name] = true
 			}
 		}
 	}

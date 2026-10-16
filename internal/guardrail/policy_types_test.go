@@ -28,3 +28,30 @@ func TestForbidNormalizesTypePositions(t *testing.T) {
 		}
 	}
 }
+
+func TestForbidVerbAwareAndMultiTokens(t *testing.T) {
+	cases := []struct {
+		rule, verb string
+		args       []string
+		want       bool
+	}{
+		{"delete pod protected", "delete", []string{"pods", "safe,protected"}, true},
+		{"delete pod protected", "delete", []string{"pods", "safe,other"}, false},
+		{"delete pod protected", "delete", []string{"pods,svc", "safe,protected"}, true},
+		{"delete pod/protected", "delete", []string{"pods", "safe,protected"}, true},
+		{"delete svc/protected", "delete", []string{"pods,svc", "safe,protected"}, true},
+		{"delete pod/a deployments/b", "delete", []string{"pod/a", "deployment/b"}, true},
+		{"delete pod/a deployment/b", "delete", []string{"po/a", "deploy/b"}, true},
+		{"delete pod/a deployments/b", "delete", []string{"pod/a", "deployment/c"}, false},
+		{"drain worker.prod", "drain", []string{"safe", "worker.prod"}, true},
+		{"drain worker.prod", "drain", []string{"worker.dev"}, false},
+		{"drain worker.prod", "drain", []string{"worker.prod"}, true},
+		{"cordon Node1", "cordon", []string{"node1"}, false},
+	}
+	for _, c := range cases {
+		p := Policy{Forbidden: []string{c.rule}}
+		if _, got := p.IsForbidden(c.verb, c.args); got != c.want {
+			t.Errorf("%q vs %s %v: got %v want %v", c.rule, c.verb, c.args, got, c.want)
+		}
+	}
+}
