@@ -30,8 +30,8 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return errors.New("delete: TYPE NAME required, or --all")
 	}
 
-	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
-	all := boolFlag(args, "--all")
+	yes := Flags.Yes || boolFlag(args, "yes")
+	all := boolFlag(args, "all")
 	// Drop superkube-only flags before forwarding to kubectl.
 	kubectlArgs := stripSkFlags(args)
 
@@ -48,6 +48,8 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	// to type, e.g. `delete -f x.yaml` or `delete pods -l app=x`.
 	fromSource := hasSource(kubectlArgs)
 	switch {
+	case isDryRunArgs(kubectlArgs):
+		// A client/server dry-run changes nothing: forward it, no confirmation.
 	case all:
 		// `delete --all` is the highest-risk variant. Refuse without both --yes
 		// and a typed "DELETE" phrase.

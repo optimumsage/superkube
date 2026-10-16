@@ -52,7 +52,7 @@ func runSecretView(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	reveal := hasFlag(args, "--reveal")
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
+	yes := Flags.Yes || boolFlag(args, "yes")
 	// Strip superkube-only flags before forwarding to kubectl.
 	kubectlArgs := stripFlag(args, "--reveal")
 	kubectlArgs = stripFlag(kubectlArgs, "--yes")

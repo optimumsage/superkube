@@ -24,7 +24,7 @@ func runRollout(cmd *cobra.Command, args []string) error {
 	if printHelpIfRequested(cmd, args) {
 		return nil
 	}
-	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	yes := Flags.Yes || boolFlag(args, "yes")
 	kubectlArgs := stripSkFlags(args)
 
 	// args may start with root flags (`sk --context prod rollout ...` leaves
@@ -39,7 +39,7 @@ func runRollout(cmd *cobra.Command, args []string) error {
 	// mutating so they fail closed on a broken config.
 	readOnly := sub == "status" || sub == "history"
 	if readOnly {
-		if rule, blocked := Policy().IsForbidden("rollout", args); blocked {
+		if rule, blocked := Policy().IsForbidden("rollout", policyArgs(args)); blocked {
 			return fmt.Errorf("rollout refused by policy %q for context matching %q",
 				rule, Policy().MatchedPattern)
 		}
@@ -47,7 +47,7 @@ func runRollout(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if sub == "restart" || sub == "undo" || sub == "pause" || sub == "resume" {
+	if (sub == "restart" || sub == "undo" || sub == "pause" || sub == "resume") && !isDryRunArgs(kubectlArgs) {
 		kind, names := splitTargets(rest)
 		var targets []string
 		for _, n := range names {

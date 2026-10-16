@@ -58,10 +58,13 @@ func TestAmbiguousLeadingFlagsRefusedWithGuidance(t *testing.T) {
 			t.Errorf("%v: code=%d calls=%q stderr=%q", argv, code, h.callLog(), stderr)
 		}
 	}
-	// Unknown leading flag with an unguarded verb stays verbatim passthrough.
+	// Round 3: an ambiguous leading flag plus ANY later known verb is
+	// refused; an unknown verb (krew plugin) stays verbatim passthrough.
 	h := newHarness(t, "")
-	if code, _ := h.run("", "--unknown", "top", "pods"); code != 0 || !strings.Contains(h.callLog(), "top pods") {
-		t.Errorf("unguarded passthrough: code=%d calls=%q", code, h.callLog())
+	h.refused("--unknown", "top", "pods")
+	h = newHarness(t, "")
+	if code, _ := h.run("", "--unknown", "myplugin", "pods"); code != 0 || !strings.Contains(h.callLog(), "myplugin pods") {
+		t.Errorf("plugin passthrough: code=%d calls=%q", code, h.callLog())
 	}
 }
 

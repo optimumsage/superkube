@@ -5,6 +5,7 @@ import (
 
 	"github.com/optimumsage/superkube/internal/config"
 	"github.com/optimumsage/superkube/internal/guardrail"
+	"github.com/optimumsage/superkube/internal/kubectl"
 	"github.com/optimumsage/superkube/internal/ui"
 )
 
@@ -22,6 +23,15 @@ func requireValidConfig(op string) error {
 	return fmt.Errorf("%s refused: config %s is invalid (%v); fix or move the file", op, config.ConfigFile(), configErr)
 }
 
+// policyArgs is what forbid rules are matched against: the command's args plus
+// the context/namespace/kubeconfig the root scan resolved (when the args don't
+// already carry them), so `forbid: ["edit -n kube-system"]` still matches when
+// cobra consumed `-n` from an intermediate position.
+func policyArgs(args []string) []string {
+	return kubectl.PrependGlobalFlags(append([]string(nil), args...),
+		Flags.Context, Flags.Namespace, Flags.Kubeconfig)
+}
+
 // guardOp is the common pre-flight for every mutating command: the config
 // must be valid and the per-context policy must not forbid verb+args. Policy
 // beats --yes; only editing config.yaml unblocks a forbidden operation.
@@ -29,7 +39,7 @@ func guardOp(verb string, args []string) error {
 	if err := requireValidConfig(verb); err != nil {
 		return err
 	}
-	if rule, blocked := Policy().IsForbidden(verb, args); blocked {
+	if rule, blocked := Policy().IsForbidden(verb, policyArgs(args)); blocked {
 		return fmt.Errorf("%s refused by policy %q for context matching %q",
 			verb, rule, Policy().MatchedPattern)
 	}
@@ -94,7 +104,7 @@ func guardPassthrough(verb string, args []string) error {
 	if configErr != nil && !readOnlyOp(verb, args) {
 		return requireValidConfig(verb)
 	}
-	if rule, blocked := Policy().IsForbidden(verb, args); blocked {
+	if rule, blocked := Policy().IsForbidden(verb, policyArgs(args)); blocked {
 		return fmt.Errorf("%s refused by policy %q for context matching %q",
 			verb, rule, Policy().MatchedPattern)
 	}

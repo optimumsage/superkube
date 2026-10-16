@@ -26,7 +26,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return errors.New("scale: --replicas=N and TYPE/NAME required")
 	}
-	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	yes := Flags.Yes || boolFlag(args, "yes")
 	kubectlArgs := stripSkFlags(args)
 
 	if err := guardOp("scale", args); err != nil {
@@ -37,7 +37,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 	if !ok {
 		return errors.New("scale: --replicas=N is required")
 	}
-	if replicas == "0" {
+	if replicas == "0" && !isDryRunArgs(kubectlArgs) {
 		target := strings.Join(positionalArgs(kubectlArgs), " ")
 		ReshowBanner()
 		if err := confirmYesNo(

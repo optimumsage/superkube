@@ -28,7 +28,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 	if printHelpIfRequested(cmd, args) {
 		return nil
 	}
-	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	yes := Flags.Yes || boolFlag(args, "yes")
 	kubectlArgs := stripSkFlags(args)
 
 	if err := guardOp("apply", args); err != nil {

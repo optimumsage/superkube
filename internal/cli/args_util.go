@@ -247,56 +247,127 @@ func splitTargets(positionals []string) (resourceType string, names []string) {
 	return resourceType, flat
 }
 
-// boolFlag reports whether a boolean flag (any of names, e.g. "--yes", "-y")
-// is set in args. `--yes=false`/`=0` mean false; the last occurrence wins.
+// boolFlag reports whether a boolean flag, given by canonical long name
+// ("yes", "all"), is set in args. It uses the same FlagsAt walk as routing,
+// scanning and stripping, so a token consumed as another flag's value
+// (`--audit --yes`) is never mistaken for the flag, and clusters (`-y`,
+// `-yRf x`) and `=false`/`=0` are honored. The last occurrence wins.
 func boolFlag(args []string, names ...string) bool {
 	set := false
-	for _, a := range args {
-		if a == "--" {
+	for i := 0; i < len(args); {
+		if args[i] == "--" {
 			break
 		}
-		for _, n := range names {
-			switch {
-			case a == n:
-				set = true
-			case strings.HasPrefix(a, n+"="):
-				switch strings.ToLower(strings.TrimPrefix(a, n+"=")) {
-				case "false", "0", "f", "no":
-					set = false
-				default:
-					set = true
+		fs, n, ok := parseTok(args, i, false)
+		if !ok {
+			i++
+			continue
+		}
+		for j, f := range fs {
+			for _, name := range names {
+				if f.Name != name {
+					continue
 				}
+				val := f.Val
+				if j == len(fs)-1 && f.UsesNext {
+					val = args[i+1]
+				}
+				set = truthy(f, val)
 			}
 		}
+		i += n
 	}
 	return set
 }
 
+// skOnlyBool are superkube flags that take no value and must never reach
+// kubectl; skOnlyValue take a value.
+var (
+	skOnlyBool  = map[string]bool{"yes": true, "plain": true, "no-context": true, "tools": true, "verbose": true}
+	skOnlyValue = map[string]bool{"audit": true, "ai-timeout": true}
+)
+
 // stripSkFlags removes superkube-only flags so they are never forwarded to
-// kubectl (which would reject them): --yes/-y, --plain, --audit X,
-// --ai-timeout X, --no-context, --tools, in both `--x v` and `--x=v` forms.
-// Every DisableFlagParsing command that shells out uses this one helper.
+// kubectl (which would reject them): --yes/-y, --plain, --verbose/-v,
+// --no-context, --tools, --audit X, --ai-timeout X, in `--x v`, `--x=v` and
+// short-cluster forms (`-yRf dir` becomes `-Rf dir`). It walks argv with the
+// shared FlagsAt table, so values of other flags are never touched. Every
+// DisableFlagParsing command that shells out to kubectl must use it.
 func stripSkFlags(args []string) []string {
 	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
+	for i := 0; i < len(args); {
+		if args[i] == "--" {
 			return append(out, args[i:]...)
 		}
-		name, _, hasEq := strings.Cut(strings.TrimLeft(a, "-"), "=")
-		long := strings.HasPrefix(a, "--")
-		switch {
-		case a == "-y":
-			continue
-		case long && (name == "yes" || name == "plain" || name == "no-context" || name == "tools"):
-			continue
-		case long && (name == "audit" || name == "ai-timeout"):
-			if !hasEq && i+1 < len(args) {
-				i++
-			}
+		fs, n, ok := parseTok(args, i, false)
+		if !ok {
+			out = append(out, args[i])
+			i++
 			continue
 		}
-		out = append(out, a)
+		a := args[i]
+		if strings.HasPrefix(a, "--") {
+			if skOnlyBool[fs[0].Name] || skOnlyValue[fs[0].Name] {
+				i += n
+				continue
+			}
+			out = append(out, args[i:i+n]...)
+			i += n
+			continue
+		}
+		// Short cluster: drop sk-only boolean letters, keep the rest.
+		var letters strings.Builder
+		tail := ""
+		for _, f := range fs {
+			switch {
+			case f.Takes:
+				tail = a[f.Idx:]
+			case skOnlyBool[f.Name]:
+			default:
+				letters.WriteByte(f.Short)
+				if f.HasVal {
+					tail = "=" + f.Val
+				}
+			}
+		}
+		if letters.Len() == 0 && tail == "" {
+			i += n
+			continue
+		}
+		out = append(out, "-"+letters.String()+tail)
+		if n == 2 {
+			out = append(out, args[i+1])
+		}
+		i += n
 	}
 	return out
+}
+
+// isDryRunArgs reports whether args carry a NON-mutating kubectl dry-run
+// (`--dry-run`, `=client`, `=server`, `=true`). Such runs change nothing, so
+// they need no confirmation; `=none`/`=false`/`=auto` still mutate.
+func isDryRunArgs(args []string) bool {
+	dry := false
+	for i := 0; i < len(args); {
+		if args[i] == "--" {
+			break
+		}
+		fs, n, ok := parseTok(args, i, false)
+		if !ok {
+			i++
+			continue
+		}
+		for _, f := range fs {
+			if f.Name != "dry-run" {
+				continue
+			}
+			v := "client"
+			if f.HasVal {
+				v = strings.ToLower(f.Val)
+			}
+			dry = v == "client" || v == "server" || v == "true" || v == "unchanged"
+		}
+		i += n
+	}
+	return dry
 }

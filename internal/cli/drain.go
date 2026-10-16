@@ -26,7 +26,7 @@ func runDrain(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return errors.New("drain: NODE name required")
 	}
-	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	yes := Flags.Yes || boolFlag(args, "yes")
 	kubectlArgs := stripSkFlags(args)
 
 	if err := guardOp("drain", args); err != nil {
@@ -42,7 +42,7 @@ func runDrain(cmd *cobra.Command, args []string) error {
 	if err := guardrail.TypedName(
 		fmt.Sprintf("drain node %s (this will evict its pods)", node),
 		node,
-		yes,
+		yes || isDryRunArgs(kubectlArgs),
 	); err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func runCordon(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return errors.New("cordon: NODE name required")
 	}
-	yes := Flags.Yes || boolFlag(args, "--yes", "-y")
+	yes := Flags.Yes || boolFlag(args, "yes")
 	kubectlArgs := stripSkFlags(args)
 
 	if err := guardOp("cordon", args); err != nil {
@@ -87,7 +87,7 @@ func runCordon(cmd *cobra.Command, args []string) error {
 		fmt.Sprintf("Cordon node %s? (new pods will not be scheduled here)", node),
 		"Use `sk uncordon` to reverse. Existing pods are unaffected.",
 		"CORDON",
-		yes,
+		yes || isDryRunArgs(kubectlArgs),
 	); err != nil {
 		return err
 	}
