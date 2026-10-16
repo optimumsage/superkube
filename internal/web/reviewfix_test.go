@@ -1,9 +1,11 @@
 package web
 
 import (
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,6 +43,48 @@ func TestWildcardHostsRefreshOnMiss(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("refresh not rate limited: %d calls", calls)
+	}
+}
+
+// Item 7: a stream opened via newSSE (logs, watch, and the POST-driven AI
+// endpoints) outlives the server-wide read/write timeouts.
+func TestSSEOutlivesServerTimeouts(t *testing.T) {
+	oldR, oldW := serverReadTimeout, serverWriteTimeout
+	serverReadTimeout, serverWriteTimeout = 300*time.Millisecond, 300*time.Millisecond
+	defer func() { serverReadTimeout, serverWriteTimeout = oldR, oldW }()
+
+	e := newHardenEnv(t, hardenOpts{})
+	h := e.s.logRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Read the (small) request body first, as the AI handlers do.
+		_, _ = io.Copy(io.Discard, r.Body)
+		sse, err := newSSE(w)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for i := 0; i < 8; i++ {
+			if err := sse.Send("tick", i); err != nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}))
+	srv := newHTTPServer(h)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Close() }()
+
+	resp, err := http.Post("http://"+ln.Addr().String()+"/", "application/json", strings.NewReader(`{"q":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	if n := strings.Count(string(b), "event: tick"); n != 8 {
+		t.Fatalf("stream cut short: %d/8 events", n)
 	}
 }
 

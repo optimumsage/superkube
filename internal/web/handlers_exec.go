@@ -57,6 +57,7 @@ func (s *Server) wsExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clearStreamDeadlines(w) // GET upgrade: no request body to wait for
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: s.originPatterns(),
 	})

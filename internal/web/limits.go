@@ -17,8 +17,8 @@ const (
 // Connection timeouts. WriteTimeout is a ceiling for ordinary request/
 // response handlers (a helm --wait install can legitimately run for minutes);
 // the streaming endpoints (SSE logs/watch, WebSocket exec) clear their own
-// deadlines — see streamingPath and withDeadlines.
-const (
+// deadlines via clearStreamDeadlines, after the request body has been read.
+var (
 	serverReadHeaderTimeout = 10 * time.Second
 	serverReadTimeout       = 60 * time.Second
 	serverWriteTimeout      = 10 * time.Minute
@@ -64,24 +64,17 @@ func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, dst any) err
 	return json.NewDecoder(r.Body).Decode(dst)
 }
 
-// streamingPath reports whether the route is a long-lived stream (SSE or
-// WebSocket) that must outlive the server-wide read/write timeouts.
-func streamingPath(path string) bool {
-	return strings.HasPrefix(path, "/api/v1/stream/") || strings.HasPrefix(path, "/ws/")
-}
-
-// withDeadlines clears the per-connection read/write deadlines for streaming
-// routes. net/http applies Server.ReadTimeout/WriteTimeout to the whole
-// connection, which would otherwise cut every log tail and exec session.
-func (s *Server) withDeadlines(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if streamingPath(r.URL.Path) {
-			rc := http.NewResponseController(w)
-			_ = rc.SetReadDeadline(time.Time{})
-			_ = rc.SetWriteDeadline(time.Time{})
-		}
-		next.ServeHTTP(w, r)
-	})
+// clearStreamDeadlines lifts the server-wide read and write deadlines for a
+// long-lived stream (SSE / WebSocket). net/http applies Server.ReadTimeout and
+// WriteTimeout to the whole connection, which would cut every log tail, AI
+// answer and exec session. Handlers call it only AFTER reading the request
+// body (so a slow-body client still hits the read deadline); a stale read
+// deadline must also be cleared because net/http's background read treats its
+// expiry as a client disconnect and cancels the request context.
+func clearStreamDeadlines(w http.ResponseWriter) {
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Time{})
+	_ = rc.SetWriteDeadline(time.Time{})
 }
 
 // newHTTPServer builds the http.Server with all hardening timeouts applied.

@@ -22,9 +22,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			s.enforceHost(
 				s.requireToken(
 					s.limitBody(
-						s.withDeadlines(
-							s.csrfGuard(next),
-						),
+						s.csrfGuard(next),
 					),
 				),
 			),

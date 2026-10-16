@@ -529,9 +529,6 @@ func TestServerTimeoutsConfigured(t *testing.T) {
 	if srv.ReadHeaderTimeout == 0 || srv.ReadTimeout == 0 || srv.WriteTimeout == 0 || srv.IdleTimeout == 0 {
 		t.Fatalf("missing timeout: %+v", srv)
 	}
-	if !streamingPath("/api/v1/stream/logs/ns/p") || !streamingPath("/ws/exec/ns/p") || streamingPath("/api/v1/info") {
-		t.Fatal("streamingPath misclassifies routes")
-	}
 }
 
 // --- 9: token handling -----------------------------------------------------------
