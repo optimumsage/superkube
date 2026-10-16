@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
-	"sigs.k8s.io/yaml"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
 // canonicalEditKind maps the URL kind (plural/singular/short name) onto the
@@ -22,7 +22,47 @@ var canonicalEditKind = map[string]string{
 	"services": "Service", "service": "Service", "svc": "Service",
 }
 
-var yamlDocSep = regexp.MustCompile(`(?m)^---[ \t]*$`)
+// manifestDoc is the identity of one YAML document in a submission.
+type manifestDoc struct {
+	Kind      string
+	Name      string
+	Namespace string
+}
+
+// parseManifestDocs splits yamlText exactly the way kubectl does (the
+// apimachinery YAML/JSON stream decoder, so `--- # comment` and CRLF
+// separators behave identically) and returns every non-empty document.
+func parseManifestDocs(yamlText string) ([]manifestDoc, error) {
+	dec := utilyaml.NewYAMLOrJSONDecoder(strings.NewReader(yamlText), 4096)
+	var docs []manifestDoc
+	for {
+		var obj struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+		}
+		var raw map[string]any
+		if err := dec.Decode(&raw); err != nil {
+			if errors.Is(err, io.EOF) {
+				return docs, nil
+			}
+			return nil, fmt.Errorf("invalid YAML: %w", err)
+		}
+		if len(raw) == 0 {
+			continue // empty / comment-only document
+		}
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid YAML: %w", err)
+		}
+		if err := json.Unmarshal(b, &obj); err != nil {
+			return nil, fmt.Errorf("invalid YAML: %w", err)
+		}
+		docs = append(docs, manifestDoc{Kind: obj.Kind, Name: obj.Metadata.Name, Namespace: obj.Metadata.Namespace})
+	}
+}
 
 // validateEditYAML ensures an edit submission is exactly one document whose
 // kind, namespace and name are the object named in the URL. Without this the
@@ -34,32 +74,21 @@ func validateEditYAML(kind, nsWant, name, sessNS, yamlText string) error {
 	if !ok {
 		return fmt.Errorf("edit not supported for kind %s", kind)
 	}
-	var docs []string
-	for _, d := range yamlDocSep.Split(yamlText, -1) {
-		if hasYAMLContent(d) {
-			docs = append(docs, d)
-		}
+	docs, err := parseManifestDocs(yamlText)
+	if err != nil {
+		return err
 	}
 	if len(docs) != 1 {
 		return errors.New("edit accepts exactly one YAML document")
 	}
-	var obj struct {
-		Kind     string `json:"kind"`
-		Metadata struct {
-			Name      string `json:"name"`
-			Namespace string `json:"namespace"`
-		} `json:"metadata"`
-	}
-	if err := yaml.Unmarshal([]byte(docs[0]), &obj); err != nil {
-		return fmt.Errorf("invalid YAML: %w", err)
-	}
+	obj := docs[0]
 	if obj.Kind != wantKind {
 		return fmt.Errorf("manifest kind %q does not match %s", obj.Kind, wantKind)
 	}
-	if obj.Metadata.Name != name {
-		return fmt.Errorf("manifest name %q does not match %q", obj.Metadata.Name, name)
+	if obj.Name != name {
+		return fmt.Errorf("manifest name %q does not match %q", obj.Name, name)
 	}
-	gotNS := obj.Metadata.Namespace
+	gotNS := obj.Namespace
 	if gotNS == "" {
 		gotNS = sessNS
 	}
@@ -67,16 +96,6 @@ func validateEditYAML(kind, nsWant, name, sessNS, yamlText string) error {
 		return fmt.Errorf("manifest namespace %q does not match %q", gotNS, nsWant)
 	}
 	return nil
-}
-
-func hasYAMLContent(doc string) bool {
-	for _, l := range strings.Split(doc, "\n") {
-		t := strings.TrimSpace(l)
-		if t != "" && !strings.HasPrefix(t, "#") {
-			return true
-		}
-	}
-	return false
 }
 
 // editBody is the shared request shape for edit preview and commit.

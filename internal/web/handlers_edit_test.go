@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/optimumsage/superkube/internal/guardrail"
 )
 
 func TestRevealSecretYAMLBytes_DecodesValues(t *testing.T) {
@@ -174,5 +176,48 @@ func TestEditPreview_RejectsEmptyYAML(t *testing.T) {
 	s.apiResourceEditPreview(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for empty yaml", rr.Code)
+	}
+}
+
+func TestEditRejectsCommentedAndCRLFSeparators(t *testing.T) {
+	ok := func(y string) error { return validateEditYAML("cm", "default", "app", "default", y) }
+	if err := ok(cmYAML); err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	second := strings.Replace(cmYAML, "name: app", "name: other", 1)
+	for name, y := range map[string]string{
+		"commented sep": cmYAML + "--- # second object\n" + second,
+		"crlf sep":      strings.ReplaceAll(cmYAML+"---\n"+second, "\n", "\r\n"),
+		"crlf comment":  strings.ReplaceAll(cmYAML+"--- # x\n"+second, "\n", "\r\n"),
+		"leading sep":   "---\n" + cmYAML + "---\n" + second,
+	} {
+		if ok(y) == nil {
+			t.Errorf("%s: accepted two documents", name)
+		}
+	}
+	if err := ok("---\n" + cmYAML + "---\n# only a comment\n"); err != nil {
+		t.Errorf("trailing empty document should be fine: %v", err)
+	}
+}
+
+func TestApplyForbidConsidersEveryDocument(t *testing.T) {
+	pol := func(string) (guardrail.Policy, error) {
+		return guardrail.Policy{Forbidden: []string{"apply secret", "apply -n kube-system"}}, nil
+	}
+	e := newHardenEnv(t, hardenOpts{policy: pol})
+	cm := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n"
+	sec := "apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\n"
+	ks := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: b\n  namespace: kube-system\n"
+	for name, y := range map[string]string{
+		"secret second": cm + "--- # more\n" + sec,
+		"ns second":     cm + "---\n" + ks,
+	} {
+		rr := e.do(t, "/api/v1/apply/preview", mustJSONStr(map[string]string{"yaml": y}))
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("%s: code %d, want 403", name, rr.Code)
+		}
+	}
+	if len(e.calls()) != 0 {
+		t.Fatalf("kubectl ran: %v", e.calls())
 	}
 }

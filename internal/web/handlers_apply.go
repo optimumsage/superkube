@@ -22,6 +22,38 @@ func yamlDigest(sess session, verb, target, yamlText string) string {
 	return digestOf(verb, sess.Namespace, target, yamlText)
 }
 
+// applyForbidden runs the forbid gates for an inline manifest against EVERY
+// document it contains: the generic `apply -f <inline>` shape plus, per
+// document, the lower-cased kind, kind/name and the effective namespace, so a
+// rule like `forbid: ["apply secret"]` or `["apply -n kube-system"]` cannot be
+// dodged by tucking the object behind a second `---` document.
+func (s *Server) applyForbidden(w http.ResponseWriter, sess session, yamlText string) bool {
+	docs, err := parseManifestDocs(yamlText)
+	if err != nil {
+		s.render.Error(w, http.StatusBadRequest, err.Error())
+		return true
+	}
+	if len(docs) == 0 {
+		s.render.Error(w, http.StatusBadRequest, "yaml required")
+		return true
+	}
+	if s.gateForbidden(w, sess, "apply", applyArgsForPolicy) {
+		return true
+	}
+	for _, d := range docs {
+		ns := d.Namespace
+		if ns == "" {
+			ns = sess.Namespace
+		}
+		args := append(append([]string{}, applyArgsForPolicy...),
+			strings.ToLower(d.Kind), d.Kind, d.Name, strings.ToLower(d.Kind)+"/"+d.Name, "-n", ns)
+		if s.gateForbidden(w, sess, "apply", args) {
+			return true
+		}
+	}
+	return false
+}
+
 // previewYAML runs `kubectl diff` for yamlText and, when there are changes,
 // issues a confirmation token bound to (verb, context, digest) that also
 // carries the previewed YAML as its Payload. The commit executes that stored
@@ -100,7 +132,7 @@ func (s *Server) apiApplyPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := s.readSession(r)
-	if s.gateForbidden(w, sess, "apply", applyArgsForPolicy) {
+	if s.applyForbidden(w, sess, body.YAML) {
 		return
 	}
 	s.previewYAML(w, r, sess, "apply", "manifest", yamlDigest(sess, "apply", "", body.YAML), body.YAML)
@@ -120,7 +152,7 @@ func (s *Server) apiApplyCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := s.readSession(r)
-	if s.gateForbidden(w, sess, "apply", applyArgsForPolicy) {
+	if s.applyForbidden(w, sess, body.YAML) {
 		return
 	}
 	entry, ok := s.consumePreview(w, sess, body.Token, "", "apply", yamlDigest(sess, "apply", "", body.YAML))
