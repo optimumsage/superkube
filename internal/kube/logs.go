@@ -3,14 +3,17 @@ package kube
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	apiwatch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -18,13 +21,18 @@ import (
 // be set. Workload uses a "deploy/foo" / "statefulset/bar" / "daemonset/baz"
 // shorthand; we resolve it to a label selector via the workload's spec.
 type MultiLogOpts struct {
-	Namespace string
-	Selector  string // raw label selector, e.g. "app=web,tier=frontend"
-	Workload  string // "deploy/foo" form
-	Container string // empty = first container per pod
-	TailLines int64  // <= 0 = no limit
-	Follow    bool
+	Namespace     string
+	Selector      string // raw label selector, e.g. "app=web,tier=frontend"
+	Workload      string // "deploy/foo" form
+	Container     string // empty = each pod's default container
+	AllContainers bool   // stream every container of every pod (like kubectl --all-containers)
+	TailLines     int64  // <= 0 = no limit
+	Follow        bool
 }
+
+// defaultContainerAnnotation is the annotation kubectl itself consults to pick
+// the container for `logs`/`exec` when a pod has several.
+const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
 
 // LinePrefixer formats the per-line prefix for pod podName, lineIndex zero-
 // based. Override to colorize per pod; pass nil for the default "[<pod>] ".
@@ -34,16 +42,23 @@ type LinePrefixer func(podName string, lineIndex int) string
 // w. Stream goroutines run concurrently; writes to w are serialized so lines
 // from different pods don't interleave mid-line on the terminal.
 //
-// Returns when all streams complete or when ctx is cancelled.
+// With Follow, a pod watch on the selector picks up pods created later (for
+// example during a rollout) and streams them from their start; in that mode
+// TailMulti runs until ctx is cancelled. Without Follow it returns once every
+// stream has completed.
 func (l Loader) TailMulti(ctx context.Context, opts MultiLogOpts, w io.Writer, prefix LinePrefixer) error {
 	cs, err := l.Clientset()
 	if err != nil {
 		return err
 	}
-	ns := opts.Namespace
-	if ns == "" {
-		ns, _ = l.CurrentNamespace()
+	if opts.Namespace == "" {
+		opts.Namespace, _ = l.CurrentNamespace()
 	}
+	return tailMulti(ctx, cs, opts, w, prefix)
+}
+
+func tailMulti(ctx context.Context, cs kubernetes.Interface, opts MultiLogOpts, w io.Writer, prefix LinePrefixer) error {
+	ns := opts.Namespace
 
 	selector := opts.Selector
 	if opts.Workload != "" {
@@ -69,43 +84,171 @@ func (l Loader) TailMulti(ctx context.Context, opts MultiLogOpts, w io.Writer, p
 		prefix = func(name string, _ int) string { return "[" + name + "] " }
 	}
 	var writeMu sync.Mutex
-	emitFrom := func(podName string, r io.Reader) {
-		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		i := 0
-		for scanner.Scan() {
-			line := scanner.Text()
-			writeMu.Lock()
-			fmt.Fprintln(w, prefix(podName, i)+line)
-			writeMu.Unlock()
-			i++
+	say := func(name string, i int, line string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		fmt.Fprintln(w, prefix(name, i)+line)
+	}
+
+	var (
+		wg      sync.WaitGroup
+		seenMu  sync.Mutex
+		started = map[string]bool{}
+	)
+	startPod := func(pod *corev1.Pod, tail *int64) {
+		seenMu.Lock()
+		if started[pod.Name+"/"+string(pod.UID)] {
+			seenMu.Unlock()
+			return
+		}
+		started[pod.Name+"/"+string(pod.UID)] = true
+		seenMu.Unlock()
+
+		containers := containersToTail(pod, opts)
+		for _, c := range containers {
+			name := pod.Name
+			if len(containers) > 1 {
+				name = pod.Name + "/" + c
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				req := cs.CoreV1().Pods(ns).GetLogs(pod.Name, &corev1.PodLogOptions{
+					Follow:    opts.Follow,
+					Container: c,
+					TailLines: tail,
+				})
+				stream, err := req.Stream(ctx)
+				if err != nil {
+					say(name, 0, "(error opening log stream: "+err.Error()+")")
+					return
+				}
+				defer stream.Close()
+				if err := emitLines(stream, func(i int, line string) { say(name, i, line) }); err != nil && ctx.Err() == nil {
+					say(name, 0, "(log stream ended with error: "+err.Error()+")")
+				}
+			}()
 		}
 	}
 
-	var wg sync.WaitGroup
-	for _, pod := range pods.Items {
-		pod := pod
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			req := cs.CoreV1().Pods(ns).GetLogs(pod.Name, &corev1.PodLogOptions{
-				Follow:    opts.Follow,
-				Container: opts.Container,
-				TailLines: tailLinesOrNil(opts.TailLines),
-			})
-			stream, err := req.Stream(ctx)
-			if err != nil {
-				writeMu.Lock()
-				fmt.Fprintln(w, prefix(pod.Name, 0)+"(error opening log stream: "+err.Error()+")")
-				writeMu.Unlock()
-				return
-			}
-			defer stream.Close()
-			emitFrom(pod.Name, stream)
-		}()
+	for i := range pods.Items {
+		startPod(&pods.Items[i], tailLinesOrNil(opts.TailLines))
+	}
+
+	if opts.Follow {
+		watchNewPods(ctx, cs, ns, selector, pods.ResourceVersion, func(p *corev1.Pod) {
+			// A pod that appeared after we started: its whole log is new, so
+			// don't apply the tail limit.
+			startPod(p, nil)
+		})
 	}
 	wg.Wait()
 	return nil
+}
+
+// containersToTail picks which containers of pod to stream. An explicit
+// Container wins, then AllContainers (init containers included, like kubectl),
+// else the pod's default container: the kubectl default-container annotation
+// if it names a real container, otherwise the first regular container. Passing
+// an empty container to the API fails for multi-container pods, which is why
+// we always resolve one.
+func containersToTail(pod *corev1.Pod, opts MultiLogOpts) []string {
+	if opts.Container != "" {
+		return []string{opts.Container}
+	}
+	if opts.AllContainers {
+		var out []string
+		for _, c := range pod.Spec.InitContainers {
+			out = append(out, c.Name)
+		}
+		for _, c := range pod.Spec.Containers {
+			out = append(out, c.Name)
+		}
+		return out
+	}
+	if def := pod.Annotations[defaultContainerAnnotation]; def != "" {
+		for _, c := range pod.Spec.Containers {
+			if c.Name == def {
+				return []string{def}
+			}
+		}
+	}
+	if len(pod.Spec.Containers) > 0 {
+		return []string{pod.Spec.Containers[0].Name}
+	}
+	return []string{""}
+}
+
+// emitLines reads r line by line with no length cap (bufio.Scanner would fail
+// the whole stream on a line past its buffer, silently losing the pod's
+// remaining output) and returns any non-EOF read error.
+func emitLines(r io.Reader, emit func(i int, line string)) error {
+	br := bufio.NewReaderSize(r, 64*1024)
+	for i := 0; ; i++ {
+		line, err := br.ReadString('\n')
+		if line != "" {
+			emit(i, strings.TrimRight(line, "\r\n"))
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+// watchNewPods invokes onPod for every Running (or already finished) pod that
+// shows up on the selector, until ctx is cancelled. It re-lists and re-watches
+// if the watch drops, so a long-running tail survives apiserver restarts and
+// 410s. Pods still Pending are skipped until a later Modified event shows them
+// running, since their log stream would fail with "container is waiting".
+func watchNewPods(ctx context.Context, cs kubernetes.Interface, ns, selector, rv string, onPod func(*corev1.Pod)) {
+	ready := func(p *corev1.Pod) bool {
+		return p.Status.Phase != corev1.PodPending && p.Status.Phase != corev1.PodUnknown
+	}
+	for ctx.Err() == nil {
+		w, err := cs.CoreV1().Pods(ns).Watch(ctx, metav1.ListOptions{LabelSelector: selector, ResourceVersion: rv})
+		if err == nil {
+		events:
+			for {
+				select {
+				case <-ctx.Done():
+					break events
+				case ev, ok := <-w.ResultChan():
+					if !ok {
+						break events
+					}
+					p, isPod := ev.Object.(*corev1.Pod)
+					if !isPod {
+						continue
+					}
+					if (ev.Type == apiwatch.Added || ev.Type == apiwatch.Modified) && ready(p) {
+						onPod(p)
+					}
+					rv = p.ResourceVersion
+				}
+			}
+			w.Stop()
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		// Watch ended or failed: back off, then re-list to resync the RV.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+		if list, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: selector}); err == nil {
+			rv = list.ResourceVersion
+			for i := range list.Items {
+				if ready(&list.Items[i]) {
+					onPod(&list.Items[i])
+				}
+			}
+		}
+	}
 }
 
 func tailLinesOrNil(n int64) *int64 {
@@ -118,7 +261,7 @@ func tailLinesOrNil(n int64) *int64 {
 // resolveWorkloadSelector turns "deploy/web" into a label selector string by
 // looking up the workload's spec.selector.matchLabels. Supports deploy,
 // statefulset, daemonset, and replicaset.
-func resolveWorkloadSelector(ctx context.Context, cs *kubernetes.Clientset, ns, workload string) (string, error) {
+func resolveWorkloadSelector(ctx context.Context, cs kubernetes.Interface, ns, workload string) (string, error) {
 	parts := strings.SplitN(workload, "/", 2)
 	if len(parts) != 2 {
 		return "", fmt.Errorf("workload must be TYPE/NAME (got %q)", workload)

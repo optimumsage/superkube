@@ -167,10 +167,11 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 	}
 
 	opts := kube.MultiLogOpts{
-		Namespace: effectiveNamespace(args),
-		Container: container,
-		TailLines: tail,
-		Follow:    follow,
+		Namespace:     effectiveNamespace(args),
+		Container:     container,
+		AllContainers: hasFlag(args, "--all-containers"),
+		TailLines:     tail,
+		Follow:        follow,
 	}
 	// Distinguish workload-shorthand from raw selector by the presence of "/".
 	if strings.Contains(target, "/") && !strings.Contains(target, "=") {
@@ -228,7 +229,12 @@ Modes:
   --multi=TARGET Stream logs from many pods at once, prefixed and colored
                  per pod. TARGET is either a workload (deploy/web,
                  statefulset/db, daemonset/log, replicaset/x) or a raw
-                 label selector (app=web,tier=frontend). Supports -f.
+                 label selector (app=web,tier=frontend). Supports -f
+                 (which also picks up pods created later, e.g. during a
+                 rollout), -c CONTAINER and --all-containers. Pods with
+                 several containers stream their default container (the
+                 kubectl.kubernetes.io/default-container annotation, else
+                 the first).
 
 Examples:
   sk logs my-pod                       # plain
