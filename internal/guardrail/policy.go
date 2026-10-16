@@ -159,7 +159,7 @@ func globRE(pattern string) (*regexp.Regexp, error) {
 // `delete namespaces foo` and `delete namespace/foo`; flags match bare or as
 // --flag=value.
 func (p Policy) IsForbidden(verb string, args []string) (rule string, blocked bool) {
-	have := argTokens(args)
+	have := argTokens(verb, args)
 	for _, rule := range p.Forbidden {
 		tokens := strings.Fields(rule)
 		if len(tokens) == 0 {
@@ -247,7 +247,7 @@ func normalizeWord(w string) string {
 // and `--cascade` never take the next token. Everything after a bare `--` is
 // positional. `TYPE a b` also yields TYPE/a and TYPE/b so a `kind/name` rule
 // matches either spelling.
-func argTokens(args []string) tokenSet {
+func argTokens(verb string, args []string) tokenSet {
 	t := tokenSet{flags: map[string]bool{}, assoc: map[string]bool{}, words: map[string]bool{}}
 	var positionals []string
 	addWord := func(a string) {
@@ -287,6 +287,11 @@ func argTokens(args []string) tokenSet {
 		if fs[len(fs)-1].UsesNext {
 			i++
 		}
+	}
+	// Drop the verb and a rollout-style subcommand so `rollout restart deploy
+	// web` and `patch deploy web` synthesize deployment/web.
+	for len(positionals) > 0 && (positionals[0] == verb || rolloutSubs[positionals[0]]) {
+		positionals = positionals[1:]
 	}
 	if len(positionals) >= 2 && !strings.Contains(positionals[0], "/") {
 		for _, kind := range strings.Split(positionals[0], ",") {
@@ -329,17 +334,42 @@ var kindAliases = map[string]string{
 	"clusterroles": "clusterrole", "clusterrolebindings": "clusterrolebinding",
 }
 
-// normalizeKind lowercases a kind, drops an API-group suffix
-// (deployments.apps -> deployments) and maps aliases to the singular name.
-func normalizeKind(k string) string {
-	k = strings.ToLower(k)
-	if base, _, ok := strings.Cut(k, "."); ok {
-		k = base
+// rolloutSubs are `kubectl rollout` subcommands, skipped when synthesizing
+// TYPE/NAME from positionals.
+var rolloutSubs = map[string]bool{
+	"restart": true, "undo": true, "pause": true, "resume": true,
+	"status": true, "history": true,
+}
+
+// kindSet holds every name normalizeKind recognizes as a kubernetes kind
+// (alias keys and their singular targets).
+var kindSet = func() map[string]bool {
+	m := map[string]bool{}
+	for k, v := range kindAliases {
+		m[k] = true
+		m[v] = true
 	}
-	if v, ok := kindAliases[k]; ok {
+	return m
+}()
+
+// normalizeKind maps a word that IS a known kind to its canonical singular
+// name: case-insensitive, aliases and plurals resolved, and an API-group
+// suffix dropped (deployments.apps -> deployment). Anything else is returned
+// untouched: a resource NAME such as `web.prod` must never be truncated at
+// its dot or lowercased into a different name.
+func normalizeKind(k string) string {
+	l := strings.ToLower(k)
+	if !kindSet[l] {
+		base, _, ok := strings.Cut(l, ".")
+		if !ok || !kindSet[base] {
+			return k
+		}
+		l = base
+	}
+	if v, ok := kindAliases[l]; ok {
 		return v
 	}
-	return k
+	return l
 }
 
 // UpgradeStyle returns the confirmation style that the policy mandates. If

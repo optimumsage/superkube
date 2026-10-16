@@ -1,6 +1,9 @@
 package guardrail
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // This file holds the ONE flag table every argv scanner shares: verb routing,
 // global-flag scanning, resource-name extraction (all in internal/cli) and the
@@ -20,6 +23,12 @@ type Flag struct {
 	HasVal bool
 	// UsesNext is true when the value is the following token (--x v, -x v).
 	UsesNext bool
+	// Short is the shorthand letter (0 for long flags) and Idx its index in the
+	// token; Takes is true for value-taking shorthands. Used to rebuild
+	// clusters when stripping flags.
+	Short byte
+	Idx   int
+	Takes bool
 }
 
 // valueShort maps value-taking shorthands to long names. In pflag a
@@ -75,6 +84,8 @@ func init() {
 		"skip-wait-for-delete-timeout",
 		// logs
 		"tail", "since", "since-time", "limit-bytes", "max-log-requests",
+		// apply/patch/misc (checked against `kubectl apply|patch --help`)
+		"field-validation", "as-user-extra", "raw", "overlay",
 	} {
 		valueFlags[n] = true
 	}
@@ -86,6 +97,8 @@ func init() {
 		"overwrite", "server-side", "follow", "previous", "timestamps",
 		"stdin", "tty", "quiet", "show-labels", "no-headers", "show-kind",
 		"dry-run", "cascade", "prefix", "all-containers", "ai",
+		"server-side", "force-conflicts", "prune", "local", "openapi-patch",
+		"validate", "allow-missing-template-keys", "show-managed-fields",
 	} {
 		knownBool[n] = true
 	}
@@ -94,7 +107,7 @@ func init() {
 		"client-certificate", "client-key", "cluster", "context", "kubeconfig",
 		"namespace", "request-timeout", "server", "tls-server-name", "token",
 		"user", "username", "password", "log-file", "log-flush-frequency",
-		"vmodule", "profile", "profile-output", "v",
+		"vmodule", "profile", "profile-output", "v", "as-user-extra",
 		"insecure-skip-tls-verify", "match-server-version",
 		"warnings-as-errors", "disable-compression",
 	} {
@@ -149,40 +162,51 @@ func FlagsAt(args []string, i int) (fs []Flag, ok bool) {
 		}
 		return []Flag{f}, true
 	}
-	// Short cluster: bool shorthands are consumed one by one; the first
-	// value-taking shorthand takes the rest of the token, or the next arg.
-	for rest := a[1:]; rest != ""; {
+	// Short cluster, parsed like pflag: bool shorthands are consumed one by
+	// one; a shorthand followed by `=` takes the rest as its value (bool or
+	// not, `-y=false`) and ends the cluster; the first value-taking shorthand
+	// takes the rest of the token, or the next arg.
+	for off := 1; off < len(a); {
+		rest := a[off:]
 		c := rest[0]
 		long, isVal := valueShort[c]
+		tail := rest[1:]
+		f := Flag{Short: c, Idx: off}
 		if !isVal {
 			name, known := boolShort[c]
 			if !known {
 				name = "-" + string(c)
 			}
-			fs = append(fs, Flag{Name: name})
-			rest = rest[1:]
+			f.Name = name
+			if tail != "" && tail[0] == '=' {
+				f.Val, f.HasVal = tail[1:], true
+				fs = append(fs, f)
+				break
+			}
+			fs = append(fs, f)
+			off++
 			continue
 		}
-		tail := rest[1:]
-		f := Flag{Name: long}
+		f.Name, f.Takes = long, true
 		switch {
 		case tail == "":
-			// -v is kubectl verbosity only with a numeric next token;
+			// -v is kubectl verbosity only with an integer next token;
 			// otherwise it is superkube's boolean --verbose.
 			if c == 'v' {
-				if i+1 < len(args) && IsNumeric(args[i+1]) {
+				if i+1 < len(args) && IsInt(args[i+1]) {
 					f.UsesNext = true
 				} else {
-					f.Name = "verbose"
+					f.Name, f.Takes = "verbose", false
 				}
 			} else {
 				f.UsesNext = i+1 < len(args)
 			}
 		case tail[0] == '=':
 			f.Val, f.HasVal = tail[1:], true
-		case c == 'v' && !IsNumeric(tail):
-			fs = append(fs, Flag{Name: "verbose"})
-			rest = tail
+		case c == 'v' && !IsInt(tail):
+			f.Name, f.Takes = "verbose", false
+			fs = append(fs, f)
+			off++
 			continue
 		default:
 			f.Val, f.HasVal = tail, true
@@ -191,6 +215,13 @@ func FlagsAt(args []string, i int) (fs []Flag, ok bool) {
 		break
 	}
 	return fs, true
+}
+
+// IsInt reports whether s parses as a (possibly signed) integer, like
+// strconv.Atoi: kubectl's `-v +0` and `-v -1` are verbosity levels.
+func IsInt(s string) bool {
+	_, err := strconv.Atoi(s)
+	return err == nil
 }
 
 // LastFlagAt is FlagsAt reduced to the flag that decides how many argv tokens

@@ -109,6 +109,43 @@ func TestIsForbiddenClustersAndKindNames(t *testing.T) {
 	}
 }
 
+func TestRound3FlagAndNameParsing(t *testing.T) {
+	// -y=false: bool shorthand with =v takes v and ends the cluster.
+	fs, _ := FlagsAt([]string{"-y=false"}, 0)
+	if len(fs) != 1 || fs[0].Name != "yes" || fs[0].Val != "false" || !fs[0].HasVal {
+		t.Errorf("-y=false = %+v", fs)
+	}
+	fs, _ = FlagsAt([]string{"-R=false"}, 0)
+	if len(fs) != 1 || fs[0].Name != "recursive" || fs[0].Val != "false" {
+		t.Errorf("-R=false = %+v", fs)
+	}
+	// -v takes signed integers (strconv.Atoi semantics).
+	for _, v := range []string{"+0", "-1", "8"} {
+		if f, _ := LastFlagAt([]string{"-v", v}, 0); !f.UsesNext || f.Name != "v" {
+			t.Errorf("-v %s should be verbosity: %+v", v, f)
+		}
+	}
+	// Names with dots are not truncated into kinds.
+	cases := []struct {
+		rule string
+		verb string
+		args []string
+		want bool
+	}{
+		{"delete pod web.prod", "delete", []string{"pod/web.prod"}, true},
+		{"delete pod web.prod", "delete", []string{"pod/web.staging"}, false},
+		{"delete pod web.prod", "delete", []string{"pod", "web.staging"}, false},
+		{"rollout deployment/web", "rollout", []string{"restart", "deploy", "web"}, true},
+		{"patch deployment/web", "patch", []string{"patch", "deploy", "web"}, true},
+	}
+	for _, tc := range cases {
+		p := Policy{Forbidden: []string{tc.rule}}
+		if _, got := p.IsForbidden(tc.verb, tc.args); got != tc.want {
+			t.Errorf("%q %v = %v, want %v", tc.rule, tc.args, got, tc.want)
+		}
+	}
+}
+
 func TestEffectivePolicyForKeepsGlobalTypedConfirm(t *testing.T) {
 	cfg := &config.Config{Guardrails: config.GuardrailsSection{RequireTypedConfirm: true}}
 	if p := EffectivePolicyFor(cfg, nil); !p.RequireTypedConfirm {
