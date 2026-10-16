@@ -189,17 +189,24 @@ func NewState() *State {
 	}
 }
 
-// SetSynced marks kind's initial LIST as complete and clears any error left
-// over from before the list succeeded.
+// SetSynced marks kind's initial LIST as complete. It deliberately leaves
+// errors alone: the LIST can succeed while the WATCH is forbidden.
 func (s *State) SetSynced(kind Kind) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.synced[kind] = true
+}
+
+// ClearError drops kind's recorded watch error (the informer's recovery
+// watcher calls it once list/watch is progressing again).
+func (s *State) ClearError(kind Kind) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.errs, kind)
 }
 
 // SetError records the latest watch/list failure for kind (shown in the
-// status bar). Cleared by SetSynced or the next successful upsert.
+// status bar). Cleared by ClearError.
 func (s *State) SetError(kind Kind, msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -232,8 +239,6 @@ func (s *State) UpsertRow(kind Kind, row Row) {
 		s.byKind[kind] = map[string]Row{}
 	}
 	s.byKind[kind][rowKey(row)] = row
-	// An event arriving means the watch is healthy again.
-	delete(s.errs, kind)
 }
 
 // DeleteRow removes the row at (kind, key); no-op if absent.

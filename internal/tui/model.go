@@ -49,13 +49,21 @@ func Run(ctx context.Context, opts Options) error {
 	state := NewState()
 	// client-go logs through klog straight to stderr, which would paint over
 	// the alt-screen. Failures surface in the status bar instead.
-	defer kube.QuietClientLogs()()
-	if _, err := StartInformers(ctx, opts.Clientset, opts.Namespace, state); err != nil {
+	restoreLogs := kube.QuietClientLogs()
+	stopInformers, err := StartInformers(ctx, opts.Clientset, opts.Namespace, state)
+	if err != nil {
+		restoreLogs()
 		return fmt.Errorf("start informers: %w", err)
 	}
+	// Order matters: stop (and wait for) the informers first, then restore
+	// klog, so teardown errors can't print over the restored terminal.
+	defer func() {
+		stopInformers()
+		restoreLogs()
+	}()
 	m := newModel(ctx, state, opts)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
-	_, err := p.Run()
+	_, err = p.Run()
 	return err
 }
 

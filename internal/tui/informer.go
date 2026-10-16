@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -14,13 +15,14 @@ import (
 
 // StartInformers wires informers for Pods, ConfigMaps, Secrets, and Ingresses,
 // each writing into state. When ns is empty all namespaces are watched.
-// Returns the single stop channel; closing it cancels the underlying factory.
+// Returns an idempotent stop func that cancels the informers and waits for
+// their goroutines to exit; it is also invoked when ctx is cancelled.
 //
 // Each informer gets a watch-error handler that records the failure on state
 // (e.g. "forbidden: cannot list resource \"pods\"") and a goroutine that marks
 // the kind as synced once its first LIST completes, so the UI can show a
 // loading state instead of a misleading empty list.
-func StartInformers(ctx context.Context, cs kubernetes.Interface, ns string, state *State) (chan struct{}, error) {
+func StartInformers(ctx context.Context, cs kubernetes.Interface, ns string, state *State) (stop func(), err error) {
 	factory := newFactory(cs, ns)
 
 	type reg struct {
@@ -28,6 +30,7 @@ func StartInformers(ctx context.Context, cs kubernetes.Interface, ns string, sta
 		inf  cache.SharedIndexInformer
 		h    cache.ResourceEventHandlerFuncs
 	}
+	var errRV sync.Map // Kind -> resourceVersion at the last watch error
 	regs := []reg{
 		{KindPod, factory.Core().V1().Pods().Informer(), podHandlers(state)},
 		{KindConfigMap, factory.Core().V1().ConfigMaps().Informer(), configMapHandlers(state)},
@@ -35,8 +38,11 @@ func StartInformers(ctx context.Context, cs kubernetes.Interface, ns string, sta
 		{KindIngress, factory.Networking().V1().Ingresses().Informer(), ingressHandlers(state)},
 	}
 	for _, r := range regs {
-		kind := r.kind
+		kind, inf := r.kind, r.inf
 		if err := r.inf.SetWatchErrorHandlerWithContext(func(_ context.Context, _ *cache.Reflector, err error) {
+			// Remember the resourceVersion the failure happened at: a later,
+			// different one proves the list/watch is making progress again.
+			errRV.Store(kind, inf.LastSyncResourceVersion())
 			state.SetError(kind, err.Error())
 		}); err != nil {
 			return nil, err
@@ -57,25 +63,52 @@ func StartInformers(ctx context.Context, cs kubernetes.Interface, ns string, sta
 		}
 	}
 
-	stop := make(chan struct{})
-	go factory.Start(stop)
+	stopCh := make(chan struct{})
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			close(stopCh)
+			factory.Shutdown() // waits for the informer goroutines to exit
+		})
+	}
+	go factory.Start(stopCh)
 
 	for _, r := range regs {
 		kind, inf := r.kind, r.inf
 		go func() {
-			if cache.WaitForCacheSync(stop, inf.HasSynced) {
+			if cache.WaitForCacheSync(stopCh, inf.HasSynced) {
 				state.SetSynced(kind)
+			}
+		}()
+		// Recovery watcher. Errors must clear on a successful relist/resync
+		// even for kinds with no objects (no events to piggyback on), but not
+		// merely because the first LIST finished: list can be allowed while
+		// watch is forbidden. So clear only once the informer's
+		// resourceVersion has moved past where the error occurred.
+		go func() {
+			tick := time.NewTicker(time.Second)
+			defer tick.Stop()
+			for {
+				select {
+				case <-stopCh:
+					return
+				case <-tick.C:
+				}
+				v, failed := errRV.Load(kind)
+				if !failed {
+					continue
+				}
+				if rv := inf.LastSyncResourceVersion(); rv != "" && rv != v.(string) {
+					errRV.Delete(kind)
+					state.ClearError(kind)
+				}
 			}
 		}()
 	}
 
 	go func() {
 		<-ctx.Done()
-		select {
-		case <-stop:
-		default:
-			close(stop)
-		}
+		stop()
 	}()
 
 	return stop, nil

@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	apiwatch "k8s.io/apimachinery/pkg/watch"
@@ -22,11 +24,12 @@ import (
 // shorthand; we resolve it to a label selector via the workload's spec.
 type MultiLogOpts struct {
 	Namespace     string
-	Selector      string // raw label selector, e.g. "app=web,tier=frontend"
-	Workload      string // "deploy/foo" form
-	Container     string // empty = each pod's default container
-	AllContainers bool   // stream every container of every pod (like kubectl --all-containers)
-	TailLines     int64  // <= 0 = no limit
+	Selector      string    // raw label selector, e.g. "app=web,tier=frontend"
+	Workload      string    // "deploy/foo" form
+	Container     string    // empty = each pod's default container
+	AllContainers bool      // stream every container of every pod (like kubectl --all-containers)
+	Warn          io.Writer // transient-problem notices (default os.Stderr)
+	TailLines     int64     // <= 0 = no limit
 	Follow        bool
 }
 
@@ -57,7 +60,30 @@ func (l Loader) TailMulti(ctx context.Context, opts MultiLogOpts, w io.Writer, p
 	return tailMulti(ctx, cs, opts, w, prefix)
 }
 
+// openLogStream opens one container's log stream. Injected so tests can
+// simulate transient failures (the fake clientset's GetLogs cannot fail).
+type openLogStream func(ctx context.Context, pod, container string, tail *int64) (io.ReadCloser, error)
+
+// Retry policy for opening a log stream. A container that is still starting
+// answers "waiting to start"; a short bounded retry rides that out, while
+// anything longer is picked up by the pod watch when the pod changes state.
+var (
+	logOpenAttempts   = 4
+	logOpenRetryDelay = time.Second
+)
+
 func tailMulti(ctx context.Context, cs kubernetes.Interface, opts MultiLogOpts, w io.Writer, prefix LinePrefixer) error {
+	open := func(ctx context.Context, pod, container string, tail *int64) (io.ReadCloser, error) {
+		return cs.CoreV1().Pods(opts.Namespace).GetLogs(pod, &corev1.PodLogOptions{
+			Follow:    opts.Follow,
+			Container: container,
+			TailLines: tail,
+		}).Stream(ctx)
+	}
+	return tailMultiWith(ctx, cs, opts, w, prefix, open)
+}
+
+func tailMultiWith(ctx context.Context, cs kubernetes.Interface, opts MultiLogOpts, w io.Writer, prefix LinePrefixer, open openLogStream) error {
 	ns := opts.Namespace
 
 	selector := opts.Selector
@@ -83,6 +109,10 @@ func tailMulti(ctx context.Context, cs kubernetes.Interface, opts MultiLogOpts, 
 	if prefix == nil {
 		prefix = func(name string, _ int) string { return "[" + name + "] " }
 	}
+	warnOut := opts.Warn
+	if warnOut == nil {
+		warnOut = os.Stderr
+	}
 	var writeMu sync.Mutex
 	say := func(name string, i int, line string) {
 		writeMu.Lock()
@@ -90,60 +120,129 @@ func tailMulti(ctx context.Context, cs kubernetes.Interface, opts MultiLogOpts, 
 		_, _ = fmt.Fprintln(w, prefix(name, i)+line)
 	}
 
+	// Streams run under sctx so a fatal watch error can stop them all.
+	sctx, cancelStreams := context.WithCancel(ctx)
+	defer cancelStreams()
+
 	var (
 		wg      sync.WaitGroup
-		seenMu  sync.Mutex
-		started = map[string]bool{}
+		claimMu sync.Mutex
+		claimed = map[string]bool{} // pod UID + container
 	)
-	startPod := func(pod *corev1.Pod, tail *int64) {
-		seenMu.Lock()
-		if started[pod.Name+"/"+string(pod.UID)] {
-			seenMu.Unlock()
-			return
+	claim := func(key string) bool {
+		claimMu.Lock()
+		defer claimMu.Unlock()
+		if claimed[key] {
+			return false
 		}
-		started[pod.Name+"/"+string(pod.UID)] = true
-		seenMu.Unlock()
+		claimed[key] = true
+		return true
+	}
+	release := func(key string) {
+		claimMu.Lock()
+		delete(claimed, key)
+		claimMu.Unlock()
+	}
 
+	streamOne := func(pod *corev1.Pod, c, name string, tail *int64) {
+		defer wg.Done()
+		key := string(pod.UID) + "/" + pod.Name + "/" + c
+		for attempt := 1; ; attempt++ {
+			stream, err := open(sctx, pod.Name, c, tail)
+			if err == nil {
+				defer func() { _ = stream.Close() }()
+				if err := emitLines(stream, func(i int, line string) { say(name, i, line) }); err != nil && sctx.Err() == nil {
+					say(name, 0, "(log stream ended with error: "+err.Error()+")")
+				}
+				return
+			}
+			if sctx.Err() != nil {
+				return
+			}
+			if attempt >= logOpenAttempts || apierrors.IsForbidden(err) || apierrors.IsNotFound(err) {
+				// Give the claim back so a later pod update (e.g. the container
+				// finally starting) can try again via the watch.
+				release(key)
+				say(name, 0, "(error opening log stream: "+err.Error()+")")
+				return
+			}
+			select {
+			case <-sctx.Done():
+				return
+			case <-time.After(time.Duration(attempt) * logOpenRetryDelay):
+			}
+		}
+	}
+
+	// startPod streams every not-yet-claimed, started container of pod. A
+	// container is claimed only when we are about to open it, so a pod that was
+	// Pending (or a container still waiting) at startup is picked up by a later
+	// watch event instead of being skipped forever.
+	startPod := func(pod *corev1.Pod, tail *int64, skipUnstarted bool) {
 		containers := containersToTail(pod, opts)
 		for _, c := range containers {
+			if skipUnstarted && !containerStarted(pod, c) {
+				continue
+			}
+			if !claim(string(pod.UID) + "/" + pod.Name + "/" + c) {
+				continue
+			}
 			name := pod.Name
 			if len(containers) > 1 {
 				name = pod.Name + "/" + c
 			}
 			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				req := cs.CoreV1().Pods(ns).GetLogs(pod.Name, &corev1.PodLogOptions{
-					Follow:    opts.Follow,
-					Container: c,
-					TailLines: tail,
-				})
-				stream, err := req.Stream(ctx)
-				if err != nil {
-					say(name, 0, "(error opening log stream: "+err.Error()+")")
-					return
-				}
-				defer func() { _ = stream.Close() }()
-				if err := emitLines(stream, func(i int, line string) { say(name, i, line) }); err != nil && ctx.Err() == nil {
-					say(name, 0, "(log stream ended with error: "+err.Error()+")")
-				}
-			}()
+			go streamOne(pod, c, name, tail)
 		}
 	}
 
 	for i := range pods.Items {
-		startPod(&pods.Items[i], tailLinesOrNil(opts.TailLines))
+		startPod(&pods.Items[i], tailLinesOrNil(opts.TailLines), opts.Follow)
 	}
 
+	var watchErr error
 	if opts.Follow {
-		watchNewPods(ctx, cs, ns, selector, pods.ResourceVersion, func(p *corev1.Pod) {
-			// A pod that appeared after we started: its whole log is new, so
-			// don't apply the tail limit.
-			startPod(p, nil)
-		})
+		watchErr = watchNewPods(sctx, cs, ns, selector, pods.ResourceVersion, func(p *corev1.Pod) {
+			// A pod (or container) that started after we began: its whole log
+			// is new, so don't apply the tail limit.
+			startPod(p, nil, true)
+		}, rateLimitedWarn(warnOut, 10*time.Second))
+		if watchErr != nil {
+			cancelStreams()
+		}
 	}
 	wg.Wait()
-	return nil
+	return watchErr
+}
+
+// containerStarted reports whether container c of pod has produced (or can
+// produce) logs: it is running or has terminated. Without a status entry we
+// fall back to the pod phase.
+func containerStarted(pod *corev1.Pod, c string) bool {
+	for _, list := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+		for _, st := range list {
+			if st.Name == c {
+				return st.State.Running != nil || st.State.Terminated != nil
+			}
+		}
+	}
+	return pod.Status.Phase != corev1.PodPending && pod.Status.Phase != corev1.PodUnknown
+}
+
+// rateLimitedWarn returns a func that writes at most one line to w per
+// interval, so a flapping apiserver doesn't flood the log stream.
+func rateLimitedWarn(w io.Writer, interval time.Duration) func(string) {
+	var mu sync.Mutex
+	var last time.Time
+	return func(msg string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !last.IsZero() && time.Since(last) < interval {
+			return
+		}
+		last = time.Now()
+		_, _ = fmt.Fprintln(w, "warning: "+msg)
+	}
 }
 
 // containersToTail picks which containers of pod to stream. An explicit
@@ -198,53 +297,76 @@ func emitLines(r io.Reader, emit func(i int, line string)) error {
 	}
 }
 
-// watchNewPods invokes onPod for every Running (or already finished) pod that
-// shows up on the selector, until ctx is cancelled. It re-lists and re-watches
-// if the watch drops, so a long-running tail survives apiserver restarts and
-// 410s. Pods still Pending are skipped until a later Modified event shows them
-// running, since their log stream would fail with "container is waiting".
-func watchNewPods(ctx context.Context, cs kubernetes.Interface, ns, selector, rv string, onPod func(*corev1.Pod)) {
-	ready := func(p *corev1.Pod) bool {
-		return p.Status.Phase != corev1.PodPending && p.Status.Phase != corev1.PodUnknown
-	}
+// watchNewPods invokes onPod for every Added/Modified pod on the selector until
+// ctx is cancelled (returns nil) or the watch hits a permanent authorization
+// failure (returns that error). onPod decides what to do with the pod, so a
+// pod that was Pending when first seen is handed over again once it changes.
+//
+// Transient failures — a failed watch call, an Error event, the stream closing
+// — are reported through warn and retried after a re-list that resyncs the
+// resourceVersion (which also covers 410 Gone).
+func watchNewPods(ctx context.Context, cs kubernetes.Interface, ns, selector, rv string, onPod func(*corev1.Pod), warn func(string)) error {
 	for ctx.Err() == nil {
 		w, err := cs.CoreV1().Pods(ns).Watch(ctx, metav1.ListOptions{LabelSelector: selector, ResourceVersion: rv})
-		if err == nil {
-		events:
-			for {
-				select {
-				case <-ctx.Done():
-					break events
-				case ev, ok := <-w.ResultChan():
-					if !ok {
-						break events
-					}
-					p, isPod := ev.Object.(*corev1.Pod)
-					if !isPod {
-						continue
-					}
-					if (ev.Type == apiwatch.Added || ev.Type == apiwatch.Modified) && ready(p) {
-						onPod(p)
-					}
-					rv = p.ResourceVersion
-				}
+		if err != nil {
+			if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+				return fmt.Errorf("watching pods: %w", err)
+			}
+			warn("pod watch failed, retrying: " + err.Error())
+		} else {
+			if ferr := pumpPods(ctx, w, &rv, onPod, warn); ferr != nil {
+				w.Stop()
+				return ferr
 			}
 			w.Stop()
 		}
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		// Watch ended or failed: back off, then re-list to resync the RV.
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-time.After(time.Second):
 		}
 		if list, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: selector}); err == nil {
 			rv = list.ResourceVersion
 			for i := range list.Items {
-				if ready(&list.Items[i]) {
-					onPod(&list.Items[i])
+				onPod(&list.Items[i])
+			}
+		} else if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+			return fmt.Errorf("listing pods: %w", err)
+		}
+	}
+	return nil
+}
+
+// pumpPods drains one watch. It returns a non-nil error only for permanent
+// authorization failures; any other end (channel closed, ctx done, transient
+// Error event) returns nil so the caller re-lists.
+func pumpPods(ctx context.Context, w apiwatch.Interface, rv *string, onPod func(*corev1.Pod), warn func(string)) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case ev, ok := <-w.ResultChan():
+			if !ok {
+				return nil
+			}
+			switch ev.Type {
+			case apiwatch.Error:
+				err := apierrors.FromObject(ev.Object)
+				if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+					return fmt.Errorf("watching pods: %w", err)
+				}
+				if !apierrors.IsGone(err) && !apierrors.IsResourceExpired(err) {
+					warn("pod watch error: " + err.Error())
+				}
+				return nil
+			case apiwatch.Added, apiwatch.Modified:
+				if p, isPod := ev.Object.(*corev1.Pod); isPod {
+					onPod(p)
+					*rv = p.ResourceVersion
 				}
 			}
 		}

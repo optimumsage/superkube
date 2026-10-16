@@ -128,8 +128,8 @@ func TestStateSyncAndErrors(t *testing.T) {
 		t.Fatal("error not recorded")
 	}
 	s.UpsertRow(KindPod, PodRow{Namespace: "a", Name: "b"})
-	if _, e := s.KindStatus(KindPod); e != "" {
-		t.Fatal("upsert should clear error")
+	if _, e := s.KindStatus(KindPod); e == "" {
+		t.Fatal("upsert must not clear errors; the recovery watcher does")
 	}
 	s.SetSynced(KindPod)
 	if synced, _ := s.KindStatus(KindPod); !synced {
@@ -145,9 +145,11 @@ func TestStartInformersSurfacesWatchErrorsAndSyncs(t *testing.T) {
 	state := NewState()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if _, err := StartInformers(ctx, cs, "", state); err != nil {
+	stop, err := StartInformers(ctx, cs, "", state)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer stop()
 	deadline := time.Now().Add(5 * time.Second)
 	var podErr string
 	var cmSynced bool

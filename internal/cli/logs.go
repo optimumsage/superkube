@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -166,10 +167,14 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 		}
 	}
 
+	allContainers, err := boolFlag(args, "--all-containers")
+	if err != nil {
+		return err
+	}
 	opts := kube.MultiLogOpts{
 		Namespace:     effectiveNamespace(args),
 		Container:     container,
-		AllContainers: hasFlag(args, "--all-containers"),
+		AllContainers: allContainers,
 		TailLines:     tail,
 		Follow:        follow,
 	}
@@ -193,6 +198,25 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 		out = lc
 	}
 	return loader.TailMulti(cmd.Context(), opts, out, prefixer)
+}
+
+// boolFlag parses a kubectl-style boolean flag from args: absent is false, a
+// bare `--name` is true, and `--name=VALUE` must parse via strconv.ParseBool.
+// A presence-only check would turn `--all-containers=false` into true.
+func boolFlag(args []string, name string) (bool, error) {
+	for _, a := range args {
+		if a == name {
+			return true, nil
+		}
+		if v, ok := strings.CutPrefix(a, name+"="); ok {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return false, fmt.Errorf("invalid value %q for %s", v, name)
+			}
+			return b, nil
+		}
+	}
+	return false, nil
 }
 
 // podPrefixer returns a LinePrefixer that colorizes the [pod-name] tag with a
