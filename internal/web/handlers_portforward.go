@@ -89,12 +89,20 @@ func (s *Server) apiPFStart(w http.ResponseWriter, r *http.Request) {
 // apiPFStop terminates a forward by id (or "all").
 func (s *Server) apiPFStop(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Stop may return stopped entries together with an error (some forwards
+	// died, others did not): always audit what was stopped, then report.
 	stopped, err := portforward.Stop(id)
+	if len(stopped) > 0 || err == nil {
+		code := 0
+		if err != nil {
+			code = 1
+		}
+		s.recordWebAudit(r, "pf-stop", []string{id, "stopped=" + itoa64(int64(len(stopped)))}, code, 0)
+	}
 	if err != nil {
-		s.render.Error(w, http.StatusInternalServerError, err.Error())
+		s.render.JSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "stopped": len(stopped)})
 		return
 	}
-	s.recordWebAudit(r, "pf-stop", []string{id}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]any{"stopped": len(stopped)})
 }
 

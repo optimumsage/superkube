@@ -11,6 +11,7 @@ import (
 
 	"github.com/optimumsage/superkube/internal/kube"
 	"github.com/optimumsage/superkube/internal/kubectl"
+	"github.com/optimumsage/superkube/internal/secretyaml"
 )
 
 // apiResourceList renders a Table-shaped LIST snapshot for any kubectl-known
@@ -141,7 +142,11 @@ func (s *Server) apiResourceYAML(w http.ResponseWriter, r *http.Request) {
 		s.apiSecretYAMLRevealed(w, r)
 		return
 	}
-	s.captureKubectlText(w, r, []string{"get", kind, r.PathValue("name"), "-n", r.PathValue("ns"), "-o", "yaml"})
+	var mask func(string) string
+	if isSecretKind(kind) {
+		mask = secretyaml.Mask // unrevealed Secret YAML must never carry live values
+	}
+	s.captureKubectlTextWith(w, r, []string{"get", kind, r.PathValue("name"), "-n", r.PathValue("ns"), "-o", "yaml"}, mask)
 }
 
 // isSecretKind returns true for any kubectl-flavored secret kind spelling.
@@ -168,6 +173,11 @@ func (s *Server) apiResourceEvents(w http.ResponseWriter, r *http.Request) {
 // stderr together, and returns text/plain. Context overrides from the session
 // are prepended first.
 func (s *Server) captureKubectlText(w http.ResponseWriter, r *http.Request, args []string) {
+	s.captureKubectlTextWith(w, r, args, nil)
+}
+
+// captureKubectlTextWith is captureKubectlText with an optional output filter.
+func (s *Server) captureKubectlTextWith(w http.ResponseWriter, r *http.Request, args []string, filter func(string) string) {
 	sess := s.readSession(r)
 	// kubectlArgs strips the session ns when the caller supplied -n explicitly.
 	full := sess.kubectlArgs(args)
@@ -180,6 +190,10 @@ func (s *Server) captureKubectlText(w http.ResponseWriter, r *http.Request, args
 		}
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if filter != nil {
+		_, _ = w.Write([]byte(filter(out.String())))
+		return
+	}
 	_, _ = w.Write(out.Bytes())
 }
 

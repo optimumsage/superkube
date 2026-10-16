@@ -2,13 +2,13 @@ package web
 
 import (
 	"bytes"
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/optimumsage/superkube/internal/kubectl"
+	"github.com/optimumsage/superkube/internal/secretyaml"
 )
 
 // editableKinds is the allowlist for the inline edit page. The list/yaml
@@ -84,76 +84,9 @@ func (s *Server) apiSecretYAMLRevealed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := revealSecretYAMLBytes(buf.Bytes())
+	out := []byte(secretyaml.Reveal(buf.String()))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write(out)
-}
-
-// revealSecretYAMLBytes is the byte-slice variant of cli.revealSecretYAML.
-// Kept here (rather than imported) to avoid making `internal/cli` an import
-// dependency of `internal/web` — the cli package already imports web via the
-// new web command file, so the inverse would be a cycle.
-//
-// Behavior matches cli/secret.go: walk lines, find the `data:` (and
-// `binaryData:`) block, base64-decode each value. Invalid base64 → sentinel.
-func revealSecretYAMLBytes(raw []byte) []byte {
-	if !bytes.Contains(raw, []byte("\ndata:")) && !bytes.HasPrefix(raw, []byte("data:")) &&
-		!bytes.Contains(raw, []byte("\nbinaryData:")) && !bytes.HasPrefix(raw, []byte("binaryData:")) {
-		return raw
-	}
-	var out bytes.Buffer
-	out.Grow(len(raw))
-	inDataBlock := false
-	lines := splitLinesKeepEOL(raw)
-	for _, line := range lines {
-		stripped := strings.TrimRight(string(line), "\n")
-		switch {
-		case stripped == "data:" || stripped == "binaryData:":
-			inDataBlock = true
-			out.Write(line)
-			continue
-		case strings.HasPrefix(stripped, "data: ") || strings.HasPrefix(stripped, "binaryData: "):
-			inDataBlock = false
-			out.Write(line)
-			continue
-		}
-		if !inDataBlock {
-			out.Write(line)
-			continue
-		}
-		if stripped == "" || !strings.HasPrefix(stripped, "  ") {
-			inDataBlock = false
-			out.Write(line)
-			continue
-		}
-		key, val, ok := splitYAMLKeyVal(stripped)
-		if !ok {
-			out.Write(line)
-			continue
-		}
-		v := strings.Trim(strings.TrimSpace(val), "\"'")
-		decoded := ""
-		if v == "" {
-			decoded = "\"\""
-		} else if d, err := base64.StdEncoding.DecodeString(v); err == nil {
-			if strings.ContainsRune(string(d), '\n') {
-				var sb strings.Builder
-				sb.WriteString("|\n")
-				for _, l := range strings.Split(string(d), "\n") {
-					sb.WriteString("    ")
-					sb.WriteString(l)
-					sb.WriteString("\n")
-				}
-				decoded = strings.TrimRight(sb.String(), "\n")
-			} else {
-				decoded = quoteYAMLIfNeeded(string(d))
-			}
-		} else {
-			decoded = "<invalid-base64>"
-		}
-		fmt.Fprintf(&out, "  %s: %s\n", key, decoded)
-	}
-	return out.Bytes()
 }
 
 func splitLinesKeepEOL(b []byte) [][]byte {

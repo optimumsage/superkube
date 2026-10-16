@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,48 +8,6 @@ import (
 
 	"github.com/optimumsage/superkube/internal/guardrail"
 )
-
-func TestRevealSecretYAMLBytes_DecodesValues(t *testing.T) {
-	in := []byte(`apiVersion: v1
-kind: Secret
-metadata:
-  name: creds
-data:
-  username: bW9oc2lu
-  password: c2VjcmV0
-type: Opaque
-`)
-	got := revealSecretYAMLBytes(in)
-	s := string(got)
-	if !strings.Contains(s, "username: mohsin") {
-		t.Errorf("expected decoded username:\n%s", s)
-	}
-	if !strings.Contains(s, "password: secret") {
-		t.Errorf("expected decoded password:\n%s", s)
-	}
-	if bytes.Contains(got, []byte("bW9oc2lu")) {
-		t.Errorf("base64 source leaked through:\n%s", s)
-	}
-	if !strings.Contains(s, "type: Opaque") {
-		t.Errorf("tail of YAML eaten:\n%s", s)
-	}
-}
-
-func TestRevealSecretYAMLBytes_InvalidBase64(t *testing.T) {
-	in := []byte("data:\n  bad: \"@nope@\"\n")
-	got := revealSecretYAMLBytes(in)
-	if !bytes.Contains(got, []byte("<invalid-base64>")) {
-		t.Errorf("expected <invalid-base64> sentinel: %s", got)
-	}
-}
-
-func TestRevealSecretYAMLBytes_NoDataBlockUnchanged(t *testing.T) {
-	in := []byte("apiVersion: v1\nkind: Service\nmetadata:\n  name: x\n")
-	got := revealSecretYAMLBytes(in)
-	if !bytes.Equal(got, in) {
-		t.Errorf("input without data block was modified: %q", got)
-	}
-}
 
 func TestIsSecretKind(t *testing.T) {
 	cases := map[string]bool{
