@@ -58,6 +58,23 @@ func TestCSRFEnsureCookieRejectsPlanted(t *testing.T) {
 	}
 }
 
+func TestCSRFStoreIsBounded(t *testing.T) {
+	s := newCSRFStore()
+	first := s.ensureCookie(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	for i := 0; i < maxCSRFTokens+500; i++ {
+		s.ensureCookie(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	}
+	s.mu.Lock()
+	n := len(s.issued)
+	s.mu.Unlock()
+	if n > maxCSRFTokens {
+		t.Fatalf("store grew to %d", n)
+	}
+	if s.valid(first) {
+		t.Fatalf("oldest token should have been evicted")
+	}
+}
+
 func TestCSRFTokenExpires(t *testing.T) {
 	s := newCSRFStore()
 	s.ttl = 10 * time.Millisecond

@@ -70,12 +70,9 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 func (s *Server) enforceHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostOnly(r.Host)
-		for _, ok := range s.allowedHosts() {
-			h := strings.ToLower(strings.Trim(ok, "[]"))
-			if host == h {
-				next.ServeHTTP(w, r)
-				return
-			}
+		if s.hostAllowed(host) || (s.refreshHosts() && s.hostAllowed(host)) {
+			next.ServeHTTP(w, r)
+			return
 		}
 		http.Error(w, "forbidden host", http.StatusForbidden)
 	})

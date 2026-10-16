@@ -26,7 +26,13 @@ type csrfStore struct {
 	mu     sync.Mutex
 	issued map[string]time.Time // token -> last use
 	ttl    time.Duration
+	// lastSweep rate-limits the O(N) expiry sweep.
+	lastSweep time.Time
 }
+
+// maxCSRFTokens bounds memory: every cookie-less request to /api/v1/info
+// would otherwise mint (and retain) a token.
+const maxCSRFTokens = 1024
 
 func newCSRFStore() *csrfStore {
 	return &csrfStore{issued: make(map[string]time.Time), ttl: csrfTTL}
@@ -42,8 +48,24 @@ func (s *csrfStore) ensureCookie(w http.ResponseWriter, r *http.Request) string 
 	}
 	tok := mintToken()
 	s.mu.Lock()
-	s.sweepLocked(time.Now())
-	s.issued[tok] = time.Now()
+	now := time.Now()
+	// Sweep at most once a minute (not on every request), then enforce the
+	// hard cap by evicting the least recently used entry.
+	if now.Sub(s.lastSweep) > time.Minute {
+		s.sweepLocked(now)
+		s.lastSweep = now
+	}
+	for len(s.issued) >= maxCSRFTokens {
+		var oldest string
+		var oldestAt time.Time
+		for t, at := range s.issued {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = t, at
+			}
+		}
+		delete(s.issued, oldest)
+	}
+	s.issued[tok] = now
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name:     csrfCookieName,

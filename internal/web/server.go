@@ -70,17 +70,20 @@ type Config struct {
 
 // Server is the running HTTP server.
 type Server struct {
-	cfg    Config
-	deps   Deps
-	mux    *http.ServeMux
-	tmpls  *template.Template
-	srv    *http.Server
-	addr   string // resolved listen address (host:port)
-	url    string // public URL incl. token if any
-	csrf   *csrfStore
-	pty    *ptyConfirmStore
-	render renderFns
-	hosts  []string // acceptable Host header values (DNS-rebind defense)
+	cfg            Config
+	deps           Deps
+	mux            *http.ServeMux
+	tmpls          *template.Template
+	srv            *http.Server
+	addr           string // resolved listen address (host:port)
+	url            string // public URL incl. token if any
+	csrf           *csrfStore
+	pty            *ptyConfirmStore
+	render         renderFns
+	hostsMu        sync.RWMutex
+	hosts          []string // acceptable Host header values (DNS-rebind defense)
+	hostsRefreshed time.Time
+	ifaceAddrs     func() ([]net.Addr, error) // nil = net.InterfaceAddrs; swappable in tests
 }
 
 // New builds a Server. It parses the embedded templates and registers all
@@ -110,6 +113,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 	hostname, _ := os.Hostname()
 	addrs, _ := net.InterfaceAddrs()
 	s.hosts = computeAllowedHosts(cfg.Bind, addrs, hostname)
+	s.hostsRefreshed = time.Now()
 	s.registerRoutes()
 	return s, nil
 }

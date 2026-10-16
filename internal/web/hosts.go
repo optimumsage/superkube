@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 )
 
 // loopbackHosts are always acceptable Host values.
@@ -71,7 +72,55 @@ func interfaceIPs(addrs []net.Addr) []net.IP {
 // for DNS-rebind protection: even though the listener is bound to 127.0.0.1
 // by default, a malicious page can resolve a name like sk.attacker.com to
 // 127.0.0.1 and pivot through the browser. Restricting Host stops that.
-func (s *Server) allowedHosts() []string { return s.hosts }
+func (s *Server) allowedHosts() []string {
+	s.hostsMu.RLock()
+	defer s.hostsMu.RUnlock()
+	return append([]string(nil), s.hosts...)
+}
+
+// hostAllowed reports whether the (already normalized) host is allowlisted.
+func (s *Server) hostAllowed(host string) bool {
+	for _, ok := range s.allowedHosts() {
+		if host == strings.ToLower(strings.Trim(ok, "[]")) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostsRefreshInterval rate-limits interface re-scans triggered by Host misses
+// so an attacker spraying bogus Host headers cannot make us scan constantly.
+const hostsRefreshInterval = 10 * time.Second
+
+// refreshHosts re-reads interface addresses for wildcard binds (DHCP renewal,
+// VPN or Wi-Fi coming up after startup). It reports whether a rescan ran.
+func (s *Server) refreshHosts() bool {
+	if !isWildcard(s.cfg.Bind) {
+		return false
+	}
+	s.hostsMu.Lock()
+	if time.Since(s.hostsRefreshed) < hostsRefreshInterval {
+		s.hostsMu.Unlock()
+		return false
+	}
+	s.hostsRefreshed = time.Now()
+	s.hostsMu.Unlock()
+
+	addrFn := s.ifaceAddrs
+	if addrFn == nil {
+		addrFn = net.InterfaceAddrs
+	}
+	addrs, err := addrFn()
+	if err != nil {
+		return false
+	}
+	hostname, _ := os.Hostname()
+	hosts := computeAllowedHosts(s.cfg.Bind, addrs, hostname)
+	s.hostsMu.Lock()
+	s.hosts = hosts
+	s.hostsMu.Unlock()
+	return true
+}
 
 // publicHost is the host to print in the startup URL. Wildcard binds print a
 // real interface address (preferring IPv4) instead of 0.0.0.0.
