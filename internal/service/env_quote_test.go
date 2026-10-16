@@ -30,6 +30,33 @@ func TestRenderSystemdQuotesPathWithSpaces(t *testing.T) {
 	}
 }
 
+func TestQuoteSystemdEscapesPercentAndNewlines(t *testing.T) {
+	if got := quoteSystemd("100%"); got != "100%%" {
+		t.Errorf("percent: %q", got)
+	}
+	if got := quoteSystemd("a\nb"); got != `"a b"` {
+		t.Errorf("newline: %q", got)
+	}
+	if got := quoteSystemd("a b%"); got != `"a b%%"` {
+		t.Errorf("space+percent: %q", got)
+	}
+}
+
+func TestRenderSystemdPathDirectivesEscaped(t *testing.T) {
+	spec := Spec{Label: "x", BinaryPath: "/bin/sk", LogPath: "/l/100%/o\nInjected=1", ErrLogPath: "/l/e%h"}
+	b, err := RenderSystemdUnit(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if contains(s, "\nInjected=1") {
+		t.Fatalf("newline injection:\n%s", s)
+	}
+	if !contains(s, "StandardOutput=append:/l/100%%/o Injected=1") || !contains(s, "StandardError=append:/l/e%%h") {
+		t.Fatalf("percent not escaped:\n%s", s)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

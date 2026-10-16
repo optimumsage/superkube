@@ -74,12 +74,12 @@ func RenderSystemdUnit(spec Spec) ([]byte, error) {
 	}
 	var b bytes.Buffer
 	b.WriteString("[Unit]\n")
-	fmt.Fprintf(&b, "Description=%s\n", spec.Label)
+	fmt.Fprintf(&b, "Description=%s\n", escapeSystemdValue(spec.Label))
 	b.WriteString("After=network-online.target\n")
 	b.WriteString("Wants=network-online.target\n")
 	b.WriteString("\n[Service]\n")
 	b.WriteString("Type=simple\n")
-	fmt.Fprintf(&b, "WorkingDirectory=%s\n", wd)
+	fmt.Fprintf(&b, "WorkingDirectory=%s\n", escapeSystemdValue(wd))
 	// systemd quotes argv entries with embedded whitespace by wrapping
 	// them in double quotes; backslash and double quote inside the value
 	// must be escaped. Most of our args (paths, ports, hex tokens) have
@@ -92,10 +92,10 @@ func RenderSystemdUnit(spec Spec) ([]byte, error) {
 	}
 	b.WriteString("\n")
 	if spec.LogPath != "" {
-		fmt.Fprintf(&b, "StandardOutput=append:%s\n", spec.LogPath)
+		fmt.Fprintf(&b, "StandardOutput=append:%s\n", escapeSystemdValue(spec.LogPath))
 	}
 	if spec.ErrLogPath != "" {
-		fmt.Fprintf(&b, "StandardError=append:%s\n", spec.ErrLogPath)
+		fmt.Fprintf(&b, "StandardError=append:%s\n", escapeSystemdValue(spec.ErrLogPath))
 	}
 	b.WriteString("Restart=on-failure\n")
 	b.WriteString("RestartSec=2\n")
@@ -119,7 +119,16 @@ func plistString(b *bytes.Buffer, s string) {
 	b.WriteString("</string>\n")
 }
 
+// escapeSystemdValue neutralizes the two things that can change a unit
+// file's meaning inside any value: a newline (starts a new directive) and %
+// (a specifier expansion).
+func escapeSystemdValue(s string) string {
+	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	return strings.ReplaceAll(s, "%", "%%")
+}
+
 func quoteSystemd(s string) string {
+	s = escapeSystemdValue(s)
 	if !strings.ContainsAny(s, " \t\"\\") {
 		return s
 	}
