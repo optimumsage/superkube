@@ -703,7 +703,7 @@ func childByName(cmd *cobra.Command, name string) *cobra.Command {
 // --ai, --ai-timeout, --no-context, --tools, --verbose) are consumed here
 // (keeping `--ai claude` in argv would leak `claude` into kubectl args);
 // EVERYTHING else (kubectl globals, --dry-run, --help, ...) is moved to just
-// after the command chain, ahead of the leaf's own args, where DisableFlagParsing commands
+// before the leaf's first own flag (or `--`), where DisableFlagParsing commands
 // forward it to kubectl and honor it. Flags interleaved with the subcommand
 // chain (`configmap -n kube-system edit x`) are moved the same way, so the
 // leaf and its policy check always see them. kubectl's `-v N` forms are
@@ -757,12 +757,51 @@ func cobraArgs(root *cobra.Command, args []string, verbIdx int, hasVerb bool) []
 		rest = append(rest, args[j:]...)
 		break
 	}
-	// Moved flags go right after the chain, ahead of the leaf's own argv, so
-	// every flag keeps its original order relative to everything after it
-	// (pflag's last-occurrence-wins must resolve exactly as the user typed).
+	// Moved flags must precede any later occurrence of the same flag so
+	// pflag's last-occurrence-wins resolves as the user typed. Flags with
+	// other names are order-independent, so they stay where they were:
+	// insert before the first leaf flag sharing a name with a moved one (or
+	// `--`, or the end).
+	movedNames := map[string]bool{}
+	for k := 0; k < len(moved); {
+		fs, n, ok := parseTok(moved, k, false)
+		if !ok {
+			k++
+			continue
+		}
+		for _, f := range fs {
+			movedNames[f.Name] = true
+		}
+		k += n
+	}
+	cut := len(rest)
+	conflict := false
+scan:
+	for k := 0; k < len(rest); k++ {
+		if rest[k] == "--" {
+			cut = k
+			break
+		}
+		fs, _, isFlag := parseTok(rest, k, false)
+		if !isFlag {
+			continue
+		}
+		for _, f := range fs {
+			if movedNames[f.Name] {
+				cut, conflict = k, true
+				break scan
+			}
+		}
+	}
+	if conflict {
+		// A later same-named flag exists: put the moved flags immediately
+		// after the command chain, ahead of everything the user wrote later.
+		cut = 0
+	}
 	out := append([]string(nil), chain...)
+	out = append(out, rest[:cut]...)
 	out = append(out, moved...)
-	out = append(out, rest...)
+	out = append(out, rest[cut:]...)
 	return normalizeVerbosity(out, 0, false)
 }
 
