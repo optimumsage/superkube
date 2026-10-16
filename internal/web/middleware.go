@@ -2,6 +2,7 @@ package web
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -20,7 +21,11 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		s.logRequests(
 			s.enforceHost(
 				s.requireToken(
-					s.csrfGuard(next),
+					s.limitBody(
+						s.withDeadlines(
+							s.csrfGuard(next),
+						),
+					),
 				),
 			),
 		),
@@ -33,7 +38,7 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				fmt.Fprintf(unwrapStderr(), "sk web panic: %v\n%s\n", rec, debug.Stack())
+				_, _ = fmt.Fprintf(unwrapStderr(), "sk web panic: %v\n%s\n", rec, debug.Stack())
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 			}
 		}()
@@ -52,7 +57,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/static/") {
 			return
 		}
-		fmt.Fprintf(unwrapStderr(), "%s %s %d %dms\n",
+		_, _ = fmt.Fprintf(unwrapStderr(), "%s %s %d %dms\n",
 			r.Method, r.URL.Path, rw.code, time.Since(start).Milliseconds())
 	})
 }
@@ -64,13 +69,9 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 // evil.example.
 func (s *Server) enforceHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := r.Host
-		if i := strings.IndexByte(host, ':'); i >= 0 {
-			host = host[:i]
-		}
-		host = strings.Trim(host, "[]")
+		host := hostOnly(r.Host)
 		for _, ok := range s.allowedHosts() {
-			h := strings.Trim(ok, "[]")
+			h := strings.ToLower(strings.Trim(ok, "[]"))
 			if host == h {
 				next.ServeHTTP(w, r)
 				return
@@ -103,16 +104,20 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 				got = c.Value
 			}
 		}
-		if got != s.cfg.Token {
+		// Constant-time compare: the token is the only credential on a
+		// non-loopback bind, so don't leak its prefix through timing.
+		if subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.Token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		// Persist the token in a cookie so XHR follow-ups don't need to carry
-		// it on every URL — cleaner than dragging it across HTMX swaps.
+		// it on every URL. HttpOnly: no script in the page ever needs to read
+		// it (fetch/EventSource/WebSocket send it automatically).
 		http.SetCookie(w, &http.Cookie{
 			Name:     "sk_token",
 			Value:    s.cfg.Token,
 			Path:     "/",
+			HttpOnly: true,
 			SameSite: http.SameSiteStrictMode,
 		})
 		next.ServeHTTP(w, r)
@@ -145,16 +150,31 @@ func (s *Server) csrfGuard(next http.Handler) http.Handler {
 			http.Error(w, "missing csrf cookie", http.StatusForbidden)
 			return
 		}
+		// Header only: a ?csrf= query fallback would let a cross-site form or
+		// link carry the value. Nothing needs it — WebSockets are exempt above.
 		header := r.Header.Get("X-CSRF-Token")
-		if header == "" {
-			header = r.URL.Query().Get("csrf")
-		}
-		if header != cookie.Value {
+		if !csrfMatches(cookie.Value, header) {
 			http.Error(w, "csrf token mismatch", http.StatusForbidden)
+			return
+		}
+		// The cookie must also be a value this server issued; otherwise a
+		// page on another localhost port could plant its own cookie+header.
+		if !s.csrf.valid(cookie.Value) {
+			http.Error(w, "csrf token not issued by this server", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// hostOnly strips the port and IPv6 brackets from a Host header value and
+// lower-cases it.
+func hostOnly(hostport string) string {
+	h := hostport
+	if sh, _, err := net.SplitHostPort(hostport); err == nil {
+		h = sh
+	}
+	return strings.ToLower(strings.Trim(h, "[]"))
 }
 
 func isSafeMethod(m string) bool {
@@ -174,6 +194,10 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.code = code
 	r.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap lets http.NewResponseController reach the real connection (per-route
+// deadlines, flushing).
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // Flush forwards to the underlying ResponseWriter's Flush so SSE handlers
 // can stream events through our middleware chain. Without this, the type

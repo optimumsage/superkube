@@ -2,7 +2,6 @@ package web
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"sort"
 	"time"
@@ -34,10 +33,7 @@ func (s *Server) apiInfo(w http.ResponseWriter, r *http.Request) {
 		currentNS, _ = loader.CurrentNamespace()
 	}
 	// Dep callbacks are optional — tests may pass a partial Deps struct.
-	bannerText, bannerKind := "", ""
-	if s.deps.Banner != nil {
-		bannerText, bannerKind = s.deps.Banner()
-	}
+	bannerText, bannerKind := s.bannerFor(sess)
 
 	kubeVer := ""
 	if s.deps.Runner != nil {
@@ -62,9 +58,11 @@ func (s *Server) apiInfo(w http.ResponseWriter, r *http.Request) {
 			"text": bannerText,
 			"kind": bannerKind,
 		},
-		"helm":  s.helmInfo(r.Context(), loader),
-		"csrf":  s.csrf.ensureCookie(w, r),
-		"token": tokenIfRequired(s.cfg.Token),
+		"helm": s.helmInfo(r.Context(), loader),
+		"csrf": s.csrf.ensureCookie(w, r),
+		// The auth token is intentionally NOT echoed here: the UI never needs
+		// it (the HttpOnly sk_token cookie rides along on fetch/EventSource/
+		// WebSocket), and returning it would hand it to any script on the page.
 	}
 	s.render.JSON(w, http.StatusOK, resp)
 }
@@ -97,13 +95,6 @@ func (s *Server) helmInfo(ctx context.Context, loader kube.Loader) map[string]an
 	return out
 }
 
-// tokenIfRequired echoes back the URL token so the shell can attach it to
-// SSE / WebSocket URLs (which can't carry the cookie reliably across all
-// browsers). Empty when no token is required.
-func tokenIfRequired(t string) string {
-	return t
-}
-
 // kubectlVersion returns a short kubectl version string. We use a short
 // timeout because asking kubectl for its version goes through the apiserver
 // in newer releases and can hang if the cluster is unreachable.
@@ -128,7 +119,8 @@ func (s *Server) apiContextsList(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	current, _ := s.loader(sess).CurrentContext()
+	// "current" is the kubeconfig's own current-context, not the session's.
+	current, _ := s.kubeconfigLoader(sess).CurrentContext()
 	s.render.JSON(w, http.StatusOK, map[string]any{
 		"current":  current,
 		"selected": sess.Context,
@@ -144,7 +136,7 @@ func (s *Server) apiContextSwitch(w http.ResponseWriter, r *http.Request) {
 		Context string `json:"context"`
 		Persist bool   `json:"persist"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := s.decodeJSON(w, r, &body); err != nil {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
@@ -182,7 +174,7 @@ func (s *Server) apiContextSwitch(w http.ResponseWriter, r *http.Request) {
 		Path: "/", MaxAge: -1, SameSite: http.SameSiteStrictMode,
 	})
 
-	s.recordWebAudit("ctx", []string{body.Context}, 0, time.Since(time.Now()))
+	s.recordWebAudit(r, "ctx", []string{body.Context}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -236,7 +228,7 @@ func (s *Server) apiNamespaceSwitch(w http.ResponseWriter, r *http.Request) {
 		Namespace string `json:"namespace"`
 		Persist   bool   `json:"persist"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := s.decodeJSON(w, r, &body); err != nil {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
@@ -256,19 +248,24 @@ func (s *Server) apiNamespaceSwitch(w http.ResponseWriter, r *http.Request) {
 
 // recordWebAudit writes one audit entry for a web-initiated verb. Wrapper so
 // individual handlers don't repeat the boilerplate.
-func (s *Server) recordWebAudit(verb string, argv []string, exitCode int, dur time.Duration) {
+//
+// The event carries the *session's* context/namespace (cookie-selected), not
+// the ones `sk web` started with, so the audit trail names the cluster that
+// was actually acted on.
+func (s *Server) recordWebAudit(r *http.Request, verb string, argv []string, exitCode int, dur time.Duration) {
 	if s.deps.Audit == nil {
 		return
 	}
+	sess := s.readSession(r)
 	cmd := "sk web " + verb
 	full := append([]string{"sk", "web", verb}, argv...)
 	s.deps.Audit(audit.Event{
 		User:       webUser(),
 		Cmd:        cmd,
 		Argv:       full,
-		Context:    s.deps.Context,
-		Namespace:  s.deps.Namespace,
-		Kubeconfig: s.deps.Kubeconfig,
+		Context:    sess.Context,
+		Namespace:  sess.Namespace,
+		Kubeconfig: sess.Kubeconfig,
 		Verb:       verb,
 		DurationMS: dur.Milliseconds(),
 		ExitCode:   exitCode,

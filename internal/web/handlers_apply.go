@@ -2,7 +2,6 @@ package web
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -12,27 +11,29 @@ import (
 	"github.com/optimumsage/superkube/internal/kubectl"
 )
 
-// apiApplyPreview accepts a YAML manifest, writes it to a temp file, and runs
-// `kubectl diff -f tmp` so the user can see exactly what will change. On
-// success we issue a single-use confirm token; the client renders the diff
-// then re-submits with the token to apiApplyCommit.
-func (s *Server) apiApplyPreview(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		YAML string `json:"yaml"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.YAML) == "" {
-		s.render.Error(w, http.StatusBadRequest, "yaml required")
-		return
-	}
+// applyArgsForPolicy is the argv shown to policy checks for an inline
+// manifest, so `forbid: ["apply"]` style rules match the web flow too.
+var applyArgsForPolicy = []string{"-f", "<inline>"}
 
-	tmp, cleanup, err := writeTempYAML(body.YAML)
+// yamlDigest binds a token to the exact manifest text, the verb and the
+// session's target (context is checked separately by the store; namespace is
+// included because kubectl injects -n from the session).
+func yamlDigest(sess session, verb, target, yamlText string) string {
+	return digestOf(verb, sess.Namespace, target, yamlText)
+}
+
+// previewYAML runs `kubectl diff` for yamlText and, when there are changes,
+// issues a confirmation token bound to (verb, context, digest) that also
+// carries the previewed YAML as its Payload. The commit executes that stored
+// payload, never whatever the client resubmits.
+func (s *Server) previewYAML(w http.ResponseWriter, r *http.Request, sess session, verb, resource, digest, yamlText string) {
+	tmp, cleanup, err := writeTempYAML(yamlText)
 	if err != nil {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer cleanup()
 
-	sess := s.readSession(r)
 	args := sess.prependGlobalFlags([]string{"-f", tmp})
 
 	var buf bytes.Buffer
@@ -51,9 +52,11 @@ func (s *Server) apiApplyPreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := s.pty.Issue(ptyConfirmEntry{
-		Verb:     "apply",
-		Resource: "manifest",
-		Argv:     args,
+		Verb:     verb,
+		Context:  sess.Context,
+		Resource: resource,
+		Digest:   digest,
+		Payload:  yamlText,
 	})
 
 	s.render.JSON(w, http.StatusOK, map[string]any{
@@ -65,52 +68,84 @@ func (s *Server) apiApplyPreview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// applyYAML writes payload to a fresh tmp file (the preview's may have been
+// GC'd) and runs `kubectl apply -f`.
+func (s *Server) applyYAML(r *http.Request, sess session, payload string) (out string, exitCode int, err error) {
+	tmp, cleanup, err := writeTempYAML(payload)
+	if err != nil {
+		return "", 0, err
+	}
+	defer cleanup()
+
+	args := sess.prependGlobalFlags([]string{"apply", "-f", tmp})
+	var buf bytes.Buffer
+	runErr := s.deps.Runner.Run(r.Context(), args, kubectl.RunOpts{Stdout: &buf, Stderr: &buf})
+	if runErr != nil {
+		exitCode = exitCodeOf(runErr)
+	}
+	return buf.String(), exitCode, nil
+}
+
+// apiApplyPreview accepts a YAML manifest, writes it to a temp file, and runs
+// `kubectl diff -f tmp` so the user can see exactly what will change. On
+// success we issue a single-use confirm token bound to the manifest's digest;
+// the client renders the diff then re-submits with the token to
+// apiApplyCommit.
+func (s *Server) apiApplyPreview(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		YAML string `json:"yaml"`
+	}
+	if err := s.decodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.YAML) == "" {
+		s.render.Error(w, http.StatusBadRequest, "yaml required")
+		return
+	}
+	sess := s.readSession(r)
+	if s.gateForbidden(w, sess, "apply", applyArgsForPolicy) {
+		return
+	}
+	s.previewYAML(w, r, sess, "apply", "manifest", yamlDigest(sess, "apply", "", body.YAML), body.YAML)
+}
+
 // apiApplyCommit consumes the token from apiApplyPreview and runs the real
-// apply. We re-write the YAML to a fresh tmp file because /tmp on the host
-// may have been GC'd between the two calls.
+// apply of exactly the previewed manifest. The resubmitted YAML must hash to
+// the digest recorded at preview time, and the policy gate is re-run (the
+// session context may have changed since the preview).
 func (s *Server) apiApplyCommit(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		YAML  string `json:"yaml"`
 		Token string `json:"confirm_token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := s.decodeJSON(w, r, &body); err != nil {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if _, ok := s.pty.Consume(body.Token, ""); !ok {
-		s.render.Error(w, http.StatusGone, "confirmation expired or invalid")
+	sess := s.readSession(r)
+	if s.gateForbidden(w, sess, "apply", applyArgsForPolicy) {
+		return
+	}
+	entry, ok := s.consumePreview(w, sess, body.Token, "", "apply", yamlDigest(sess, "apply", "", body.YAML))
+	if !ok {
 		return
 	}
 
-	tmp, cleanup, err := writeTempYAML(body.YAML)
+	start := time.Now()
+	out, exitCode, err := s.applyYAML(r, sess, entry.Payload)
 	if err != nil {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer cleanup()
+	s.recordWebAudit(r, "apply", applyArgsForPolicy, exitCode, time.Since(start))
 
-	sess := s.readSession(r)
-	args := sess.prependGlobalFlags([]string{"apply", "-f", tmp})
-
-	var out bytes.Buffer
-	start := time.Now()
-	runErr := s.deps.Runner.Run(r.Context(), args, kubectl.RunOpts{Stdout: &out, Stderr: &out})
-	exitCode := 0
-	if runErr != nil {
-		exitCode = exitCodeOf(runErr)
-	}
-	s.recordWebAudit("apply", []string{"-f", "<inline>"}, exitCode, time.Since(start))
-
-	if runErr != nil && exitCode != 0 {
+	if exitCode != 0 {
 		s.render.JSON(w, http.StatusBadGateway, map[string]any{
 			"status": "error",
-			"output": out.String(),
+			"output": out,
 		})
 		return
 	}
 	s.render.JSON(w, http.StatusOK, map[string]any{
 		"status": "applied",
-		"output": out.String(),
+		"output": out,
 	})
 }
 

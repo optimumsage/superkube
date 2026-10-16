@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -32,7 +31,7 @@ func (s *Server) apiConfigPut(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		YAML string `json:"yaml"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := s.decodeJSON(w, r, &body); err != nil {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
@@ -50,7 +49,7 @@ func (s *Server) apiConfigPut(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordWebAudit("config-put", []string{path}, 0, 0)
+	s.recordWebAudit(r, "config-put", []string{path}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
@@ -71,7 +70,7 @@ func (s *Server) apiConfigInit(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordWebAudit("config-init", []string{path}, 0, 0)
+	s.recordWebAudit(r, "config-init", []string{path}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]string{"status": "initialized", "path": path})
 }
 

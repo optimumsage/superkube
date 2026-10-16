@@ -37,6 +37,16 @@ func (s *Server) readSession(r *http.Request) session {
 	if c, err := r.Cookie(sessNsCookie); err == nil && c.Value != "" {
 		sess.Namespace = c.Value
 	}
+	// Pin the effective context. Policy, banner, audit and every client-go /
+	// kubectl call must agree on which cluster this request targets, so when
+	// neither the cookie nor `sk --context` named one we resolve the
+	// kubeconfig's current-context here rather than letting each consumer
+	// guess independently.
+	if sess.Context == "" {
+		if c, err := s.kubeconfigLoader(sess).CurrentContext(); err == nil {
+			sess.Context = c
+		}
+	}
 	return sess
 }
 
@@ -46,7 +56,29 @@ func (s *Server) readSession(r *http.Request) session {
 func (s *Server) loader(sess session) kube.Loader {
 	l := s.deps.Loader
 	l.KubeconfigPath = sess.Kubeconfig
+	// The loader copy must follow the UI's context switch, otherwise client-go
+	// views stay on the startup context while kubectl calls (which get
+	// --context from the session) hit a different cluster.
+	l.Context = sess.Context
 	return l
+}
+
+// kubeconfigLoader is a loader that ignores the session's context override.
+// It reports the kubeconfig's own current-context.
+func (s *Server) kubeconfigLoader(sess session) kube.Loader {
+	l := s.deps.Loader
+	l.KubeconfigPath = sess.Kubeconfig
+	l.Context = ""
+	return l
+}
+
+// kubectlArgs prefixes args with the session's global flags, skipping the -n
+// injection when args already carry an explicit namespace.
+func (sess session) kubectlArgs(args []string) []string {
+	if hasFlagN(args) {
+		return sess.prependGlobalFlagsNoNS(args)
+	}
+	return sess.prependGlobalFlags(args)
 }
 
 // prependGlobalFlags returns args prefixed with --kubeconfig/--context/-n

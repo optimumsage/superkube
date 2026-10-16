@@ -49,7 +49,7 @@ func (s *Server) streamLogs(w http.ResponseWriter, r *http.Request) {
 		_ = sse.Send("error", map[string]string{"message": err.Error()})
 		return
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	sc := bufio.NewScanner(stream)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)

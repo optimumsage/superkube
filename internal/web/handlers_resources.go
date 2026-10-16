@@ -160,13 +160,8 @@ func (s *Server) apiResourceEvents(w http.ResponseWriter, r *http.Request) {
 // are prepended first.
 func (s *Server) captureKubectlText(w http.ResponseWriter, r *http.Request, args []string) {
 	sess := s.readSession(r)
-	// Strip session ns when caller already supplied -n explicitly.
-	full := args
-	if hasFlagN(args) {
-		full = sess.prependGlobalFlagsNoNS(args)
-	} else {
-		full = sess.prependGlobalFlags(args)
-	}
+	// kubectlArgs strips the session ns when the caller supplied -n explicitly.
+	full := sess.kubectlArgs(args)
 	var out bytes.Buffer
 	err := s.deps.Runner.Run(r.Context(), full, kubectl.RunOpts{Stdout: &out, Stderr: &out})
 	if err != nil && !isExit1(err) {

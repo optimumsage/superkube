@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/optimumsage/superkube/internal/audit"
-	"github.com/optimumsage/superkube/internal/guardrail"
 	"github.com/optimumsage/superkube/internal/helm"
 )
 
@@ -40,10 +39,8 @@ func newTestServerWithHelm(t *testing.T) *Server {
 	t.Helper()
 	bin := fakeHelmBinary(t)
 	deps := Deps{
-		Helm:   &helm.Runner{Path: bin},
-		Policy: func() guardrail.Policy { return guardrail.Policy{} },
-		Banner: func() (string, string) { return "", "" },
-		Audit:  func(audit.Event) {},
+		Helm:  &helm.Runner{Path: bin},
+		Audit: func(audit.Event) {},
 	}
 	s, err := New(Config{Bind: "127.0.0.1", NoOpen: true}, deps)
 	if err != nil {
@@ -147,10 +144,8 @@ func TestHelmRepoAdd_RedactsPasswordInAudit(t *testing.T) {
 	captured := []audit.Event{}
 	bin := fakeHelmBinary(t)
 	deps := Deps{
-		Helm:   &helm.Runner{Path: bin},
-		Policy: func() guardrail.Policy { return guardrail.Policy{} },
-		Banner: func() (string, string) { return "", "" },
-		Audit:  func(e audit.Event) { captured = append(captured, e) },
+		Helm:  &helm.Runner{Path: bin},
+		Audit: func(e audit.Event) { captured = append(captured, e) },
 	}
 	s, err := New(Config{Bind: "127.0.0.1", NoOpen: true}, deps)
 	if err != nil {
@@ -189,8 +184,9 @@ func postJSON(t *testing.T, s *Server, path, body string) *httptest.ResponseReco
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Host = "127.0.0.1"
 	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "t"})
-	req.Header.Set("X-CSRF-Token", "t")
+	tok := s.csrf.ensureCookie(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: tok})
+	req.Header.Set("X-CSRF-Token", tok)
 	s.middleware(s.mux).ServeHTTP(rr, req)
 	return rr
 }

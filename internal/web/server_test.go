@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/optimumsage/superkube/internal/audit"
-	"github.com/optimumsage/superkube/internal/guardrail"
 )
 
 // newTestServer builds a Server suitable for httptest: no real kube/runner,
@@ -17,9 +16,7 @@ import (
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	deps := Deps{
-		Policy: func() guardrail.Policy { return guardrail.Policy{} },
-		Banner: func() (string, string) { return "", "" },
-		Audit:  func(audit.Event) {},
+		Audit: func(audit.Event) {},
 	}
 	s, err := New(Config{Bind: "127.0.0.1", NoOpen: true}, deps)
 	if err != nil {
@@ -87,8 +84,9 @@ func TestCSRFAcceptsMatchingHeader(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/namespaces/switch",
 		strings.NewReader(`{"namespace":"foo"}`))
 	req.Host = "127.0.0.1"
-	req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "abc"})
-	req.Header.Set("X-CSRF-Token", "abc")
+	tok := s.csrf.ensureCookie(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	req.AddCookie(&http.Cookie{Name: csrfCookieName, Value: tok})
+	req.Header.Set("X-CSRF-Token", tok)
 	// May still return non-2xx because the loader isn't real, but the CSRF
 	// guard must not return 403 due to the header check.
 	s.middleware(s.mux).ServeHTTP(rr, req)
@@ -98,7 +96,7 @@ func TestCSRFAcceptsMatchingHeader(t *testing.T) {
 }
 
 func TestTokenRequiredWhenSet(t *testing.T) {
-	deps := Deps{Policy: func() guardrail.Policy { return guardrail.Policy{} }, Banner: func() (string, string) { return "", "" }, Audit: func(audit.Event) {}}
+	deps := Deps{Audit: func(audit.Event) {}}
 	s, err := New(Config{Bind: "0.0.0.0", Token: "secret-token", NoOpen: true}, deps)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -106,7 +104,7 @@ func TestTokenRequiredWhenSet(t *testing.T) {
 	// No token → 401.
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/info", nil)
-	req.Host = "0.0.0.0"
+	req.Host = "localhost"
 	s.middleware(s.mux).ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("no-token status = %d, want 401", rr.Code)
@@ -114,7 +112,7 @@ func TestTokenRequiredWhenSet(t *testing.T) {
 	// With token in query → not 401.
 	rr2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/info?token=secret-token", nil)
-	req2.Host = "0.0.0.0"
+	req2.Host = "localhost"
 	s.middleware(s.mux).ServeHTTP(rr2, req2)
 	if rr2.Code == http.StatusUnauthorized {
 		t.Fatalf("token in query should pass auth")

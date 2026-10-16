@@ -2,7 +2,6 @@ package web
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"time"
 
@@ -21,7 +20,7 @@ func (s *Server) apiAIExplain(w http.ResponseWriter, r *http.Request) {
 		WithContext   bool   `json:"with_context"`
 		AllowReadOnly bool   `json:"allow_read_only"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Question == "" {
+	if err := s.decodeJSON(w, r, &body); err != nil || body.Question == "" {
 		http.Error(w, "question required", http.StatusBadRequest)
 		return
 	}
@@ -31,6 +30,15 @@ func (s *Server) apiAIExplain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := s.readSession(r)
+	// The provider's own kubectl tool calls run against the kubeconfig's
+	// current-context; they cannot be pinned to the UI's session context. If
+	// the two differ, tool access would silently read a different cluster than
+	// the one on screen, so withhold it.
+	if body.AllowReadOnly {
+		if cur, err := s.kubeconfigLoader(sess).CurrentContext(); err != nil || cur != sess.Context {
+			body.AllowReadOnly = false
+		}
+	}
 	in := ai.PromptInputs{
 		Question:     body.Question,
 		Context:      sess.Context,
@@ -69,7 +77,7 @@ func (s *Server) apiAILogs(w http.ResponseWriter, r *http.Request) {
 		Container string `json:"container"`
 		Tail      int64  `json:"tail"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Pod == "" {
+	if err := s.decodeJSON(w, r, &body); err != nil || body.Pod == "" {
 		http.Error(w, "pod required", http.StatusBadRequest)
 		return
 	}
@@ -111,7 +119,7 @@ func (s *Server) runDiagnose(w http.ResponseWriter, r *http.Request, tmpl string
 		Name      string `json:"name"`
 		Namespace string `json:"namespace"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+	if err := s.decodeJSON(w, r, &body); err != nil || body.Name == "" {
 		http.Error(w, "kind/name required", http.StatusBadRequest)
 		return
 	}
@@ -180,7 +188,7 @@ func (s *Server) streamAI(w http.ResponseWriter, r *http.Request, provider ai.Pr
 		_ = sse.Send("error", map[string]string{"message": err.Error()})
 	}
 	_ = sse.Send("end", map[string]any{"ms": time.Since(start).Milliseconds()})
-	s.recordWebAudit("ai-"+verb, []string{provider.Name()}, 0, time.Since(start))
+	s.recordWebAudit(r, "ai-"+verb, []string{provider.Name()}, 0, time.Since(start))
 }
 
 // chunkSSE wraps an SSE writer in an io.Writer that emits a "chunk" event for
@@ -198,13 +206,7 @@ func (c *chunkSSE) Write(p []byte) (int, error) {
 // captureKubectl runs kubectl with args and returns the combined output.
 // Errors are swallowed because diagnose handlers want best-effort capture.
 func (s *Server) captureKubectl(r *http.Request, args []string) string {
-	sess := s.readSession(r)
-	full := args
-	if hasFlagN(args) {
-		full = sess.prependGlobalFlagsNoNS(args)
-	} else {
-		full = sess.prependGlobalFlags(args)
-	}
+	full := s.readSession(r).kubectlArgs(args)
 	var buf bytes.Buffer
 	_ = s.deps.Runner.Run(r.Context(), full, kubectl.RunOpts{Stdout: &buf, Stderr: &buf})
 	return buf.String()

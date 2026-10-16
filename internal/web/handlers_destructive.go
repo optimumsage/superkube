@@ -2,11 +2,9 @@ package web
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/optimumsage/superkube/internal/kubectl"
@@ -15,6 +13,10 @@ import (
 // destructiveRequest is the common JSON body shape for delete/scale/rollout
 // /drain/cordon. Not every field applies to every verb — handlers use only
 // what they need.
+//
+// There is deliberately no client-controlled "yes" field: confirmation can
+// only be skipped by the server operator (`sk web --yes`), never by a request
+// body. Unknown JSON keys (including a stray "yes") are ignored.
 type destructiveRequest struct {
 	Kind         string `json:"kind"`          // resource kind (pod, deployment, node, ...)
 	Name         string `json:"name"`          // resource name
@@ -26,7 +28,6 @@ type destructiveRequest struct {
 	Force        bool   `json:"force"`         // drain --force etc.
 	IgnoreDS     bool   `json:"ignore_ds"`     // drain --ignore-daemonsets
 	DeleteEmpty  bool   `json:"delete_empty"`  // drain --delete-emptydir-data
-	Yes          bool   `json:"yes"`           // bypass confirmation (mirrors --yes)
 	ConfirmToken string `json:"confirm_token"` // returned from a previous needs_confirmation
 	ConfirmValue string `json:"confirm_value"` // typed value the user entered
 }
@@ -46,37 +47,11 @@ type confirmationResponse struct {
 	ForbidReason string `json:"forbid_reason,omitempty"`
 }
 
-// gateForbidden returns true and writes the response when policy forbids the
-// operation outright. Forbid is absolute — no token bypasses it, mirroring
-// the CLI's behavior (only editing config.yaml unblocks).
-func (s *Server) gateForbidden(w http.ResponseWriter, verb string, args []string) bool {
-	rule, blocked := s.deps.Policy().IsForbidden(verb, args)
-	if !blocked {
-		return false
-	}
-	bannerText, bannerKind := s.deps.Banner()
-	s.render.JSON(w, http.StatusForbidden, confirmationResponse{
-		Status:       "blocked",
-		Prompt:       "policy forbids this operation",
-		Detail:       "Edit config.yaml to remove the forbid rule before retrying.",
-		ForbidReason: rule,
-		BannerText:   bannerText,
-		BannerKind:   bannerKind,
-	})
-	return true
-}
-
 // runKubectlCaptured runs kubectl with args and returns combined output + the
 // exit code. Used by every destructive handler so they share one logging /
 // audit shape.
 func (s *Server) runKubectlCaptured(r *http.Request, args []string) (string, int) {
-	sess := s.readSession(r)
-	full := args
-	if !hasFlagN(args) {
-		full = sess.prependGlobalFlags(args)
-	} else {
-		full = sess.prependGlobalFlagsNoNS(args)
-	}
+	full := s.readSession(r).kubectlArgs(args)
 	var out bytes.Buffer
 	err := s.deps.Runner.Run(r.Context(), full, kubectl.RunOpts{Stdout: &out, Stderr: &out})
 	if err != nil {
@@ -85,51 +60,72 @@ func (s *Server) runKubectlCaptured(r *http.Request, args []string) (string, int
 	return out.String(), 0
 }
 
+// argvDigest binds a confirmation token to the exact argv (plus the session
+// namespace that kubectl injects when argv carries no -n of its own).
+func argvDigest(sess session, verb string, args []string) string {
+	parts := append([]string{verb, sess.Namespace}, args...)
+	return digestOf(parts...)
+}
+
+// badToken reports values that must never reach kubectl's argv as a resource
+// kind / name / namespace: empty or flag-shaped.
+func badToken(vals ...string) bool {
+	for _, v := range vals {
+		if v == "" || v[0] == '-' {
+			return true
+		}
+	}
+	return false
+}
+
+// finish runs args, audits, and writes the standard result body.
+func (s *Server) finish(w http.ResponseWriter, r *http.Request, verb string, args []string) {
+	start := time.Now()
+	output, code := s.runKubectlCaptured(r, args)
+	s.recordWebAudit(r, verb, args, code, time.Since(start))
+	s.render.JSON(w, statusForExit(code), map[string]any{"output": output, "exit_code": code})
+}
+
 // --- delete ----------------------------------------------------------------
 
 func (s *Server) apiDelete(w http.ResponseWriter, r *http.Request) {
 	var body destructiveRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := s.decodeJSON(w, r, &body); err != nil {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	if badToken(body.Kind) || (!body.All && badToken(body.Name)) || (body.Namespace != "" && badToken(body.Namespace)) {
+		s.render.Error(w, http.StatusBadRequest, "kind and name required")
+		return
+	}
+	sess := s.readSession(r)
 	args := buildDeleteArgs(body)
-	if s.gateForbidden(w, "delete", args) {
+	if s.gateForbidden(w, sess, "delete", args) {
 		return
 	}
 
-	// Confirmation step.
-	if body.ConfirmToken != "" {
-		if _, ok := s.pty.Consume(body.ConfirmToken, body.ConfirmValue); !ok {
-			s.render.Error(w, http.StatusGone, "confirmation expired or did not match")
-			return
+	// --all → typed phrase "DELETE" that the server-side --yes cannot skip;
+	// one name → typed name, and the token is bound to that exact argv so
+	// confirming "foo" can never delete a different object.
+	op := confirmOp{Verb: "delete", Resource: body.Kind + "/" + body.Name, Digest: argvDigest(sess, "delete", args)}
+	if body.All {
+		ns := body.Namespace
+		if ns == "" {
+			ns = sess.Namespace
 		}
-	} else if !body.Yes {
-		// Choose style: --all → typed phrase "DELETE"; one name → typed name.
-		bannerText, bannerKind := s.deps.Banner()
-		resp := confirmationResponse{
-			Status:     "needs_confirmation",
-			BannerText: bannerText, BannerKind: bannerKind,
-		}
-		if body.All {
-			resp.Style = "typed_phrase"
-			resp.Prompt = fmt.Sprintf("Type DELETE to delete every %s in namespace %s", body.Kind, body.Namespace)
-			resp.Expect = "DELETE"
-		} else {
-			resp.Style = "typed_name"
-			resp.Prompt = "Type the resource name to delete"
-			resp.Expect = body.Name
-		}
-		resp.Token = s.pty.Issue(ptyConfirmEntry{Verb: "delete", Resource: body.Kind + "/" + body.Name, Expect: resp.Expect, Argv: args})
-		resp.TTLSeconds = 30
-		s.render.JSON(w, http.StatusOK, resp)
+		op.Style = "typed_phrase"
+		op.Prompt = fmt.Sprintf("Type DELETE to delete every %s in namespace %s", body.Kind, ns)
+		op.Expect = "DELETE"
+		op.NoSkip = true
+	} else {
+		op.Style = "typed_name"
+		op.Prompt = "Type the resource name to delete"
+		op.Expect = body.Name
+	}
+	if !s.gateConfirm(w, sess, op, body.ConfirmToken, body.ConfirmValue) {
 		return
 	}
-
-	start := time.Now()
-	output, code := s.runKubectlCaptured(r, args)
-	s.recordWebAudit("delete", args, code, time.Since(start))
-	s.render.JSON(w, statusForExit(code), map[string]any{"output": output, "exit_code": code})
+	s.finish(w, r, "delete", args)
 }
 
 func buildDeleteArgs(b destructiveRequest) []string {
@@ -149,41 +145,37 @@ func buildDeleteArgs(b destructiveRequest) []string {
 
 func (s *Server) apiScale(w http.ResponseWriter, r *http.Request) {
 	var body destructiveRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Replicas == nil {
+	if err := s.decodeJSON(w, r, &body); err != nil || body.Replicas == nil || *body.Replicas < 0 {
 		s.render.Error(w, http.StatusBadRequest, "kind, name, replicas required")
 		return
 	}
+	if badToken(body.Kind, body.Name) || (body.Namespace != "" && badToken(body.Namespace)) {
+		s.render.Error(w, http.StatusBadRequest, "kind, name, replicas required")
+		return
+	}
+	sess := s.readSession(r)
 	args := []string{"scale", body.Kind + "/" + body.Name, "--replicas=" + strconv.Itoa(*body.Replicas)}
 	if body.Namespace != "" {
 		args = append(args, "-n", body.Namespace)
 	}
-	if s.gateForbidden(w, "scale", args) {
+	if s.gateForbidden(w, sess, "scale", args) {
 		return
 	}
-	// Only scaling to zero triggers confirmation (CLI parity).
+	// Only scaling to zero triggers confirmation (CLI parity). Policy may
+	// upgrade the yes/no to typing the workload name.
 	if *body.Replicas == 0 {
-		if body.ConfirmToken == "" && !body.Yes {
-			t := s.pty.Issue(ptyConfirmEntry{Verb: "scale", Resource: body.Kind + "/" + body.Name, Argv: args})
-			s.render.JSON(w, http.StatusOK, confirmationResponse{
-				Status: "needs_confirmation",
-				Style:  "yes_no",
-				Prompt: fmt.Sprintf("Scale %s/%s to zero replicas?", body.Kind, body.Name),
-				Detail: "This will gracefully terminate every pod owned by the workload.",
-				Token:  t, TTLSeconds: 30,
-			})
+		op := confirmOp{
+			Verb: "scale", Resource: body.Kind + "/" + body.Name, Name: body.Name,
+			Style:  "yes_no",
+			Prompt: fmt.Sprintf("Scale %s/%s to zero replicas?", body.Kind, body.Name),
+			Detail: "This will gracefully terminate every pod owned by the workload.",
+			Digest: argvDigest(sess, "scale", args),
+		}
+		if !s.gateConfirm(w, sess, op, body.ConfirmToken, body.ConfirmValue) {
 			return
 		}
-		if body.ConfirmToken != "" {
-			if _, ok := s.pty.Consume(body.ConfirmToken, ""); !ok {
-				s.render.Error(w, http.StatusGone, "confirmation expired")
-				return
-			}
-		}
 	}
-	start := time.Now()
-	output, code := s.runKubectlCaptured(r, args)
-	s.recordWebAudit("scale", args, code, time.Since(start))
-	s.render.JSON(w, statusForExit(code), map[string]any{"output": output, "exit_code": code})
+	s.finish(w, r, "scale", args)
 }
 
 // --- rollout ---------------------------------------------------------------
@@ -195,10 +187,15 @@ func (s *Server) apiRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body destructiveRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := s.decodeJSON(w, r, &body); err != nil {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	if badToken(body.Kind, body.Name) || (body.Namespace != "" && badToken(body.Namespace)) {
+		s.render.Error(w, http.StatusBadRequest, "kind and name required")
+		return
+	}
+	sess := s.readSession(r)
 	args := []string{"rollout", action, body.Kind + "/" + body.Name}
 	if body.Namespace != "" {
 		args = append(args, "-n", body.Namespace)
@@ -208,29 +205,20 @@ func (s *Server) apiRollout(w http.ResponseWriter, r *http.Request) {
 	}
 	// undo is destructive; require typed name (CLI parity).
 	if action == "undo" {
-		if s.gateForbidden(w, "rollout", args) {
+		if s.gateForbidden(w, sess, "rollout", args) {
 			return
 		}
-		if body.ConfirmToken == "" && !body.Yes {
-			t := s.pty.Issue(ptyConfirmEntry{Verb: "rollout", Resource: body.Kind + "/" + body.Name, Expect: body.Name, Argv: args})
-			s.render.JSON(w, http.StatusOK, confirmationResponse{
-				Status: "needs_confirmation", Style: "typed_name",
-				Prompt: "Type the workload name to roll back",
-				Expect: body.Name, Token: t, TTLSeconds: 30,
-			})
-			return
+		op := confirmOp{
+			Verb: "rollout", Resource: body.Kind + "/" + body.Name,
+			Style: "typed_name", Expect: body.Name,
+			Prompt: "Type the workload name to roll back",
+			Digest: argvDigest(sess, "rollout", args),
 		}
-		if body.ConfirmToken != "" {
-			if _, ok := s.pty.Consume(body.ConfirmToken, body.ConfirmValue); !ok {
-				s.render.Error(w, http.StatusGone, "confirmation did not match")
-				return
-			}
+		if !s.gateConfirm(w, sess, op, body.ConfirmToken, body.ConfirmValue) {
+			return
 		}
 	}
-	start := time.Now()
-	output, code := s.runKubectlCaptured(r, args)
-	s.recordWebAudit("rollout", args, code, time.Since(start))
-	s.render.JSON(w, statusForExit(code), map[string]any{"output": output, "exit_code": code})
+	s.finish(w, r, "rollout", args)
 }
 
 var rolloutActions = map[string]bool{
@@ -242,10 +230,11 @@ var rolloutActions = map[string]bool{
 
 func (s *Server) apiDrain(w http.ResponseWriter, r *http.Request) {
 	var body destructiveRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name) {
 		s.render.Error(w, http.StatusBadRequest, "name required")
 		return
 	}
+	sess := s.readSession(r)
 	args := []string{"drain", body.Name}
 	if body.Force {
 		args = append(args, "--force")
@@ -256,29 +245,20 @@ func (s *Server) apiDrain(w http.ResponseWriter, r *http.Request) {
 	if body.DeleteEmpty {
 		args = append(args, "--delete-emptydir-data")
 	}
-	if s.gateForbidden(w, "drain", args) {
+	if s.gateForbidden(w, sess, "drain", args) {
 		return
 	}
-	if body.ConfirmToken == "" && !body.Yes {
-		t := s.pty.Issue(ptyConfirmEntry{Verb: "drain", Resource: "node/" + body.Name, Expect: body.Name, Argv: args})
-		s.render.JSON(w, http.StatusOK, confirmationResponse{
-			Status: "needs_confirmation", Style: "typed_name",
-			Prompt: "Type the node name to drain it",
-			Detail: "This will evict every pod from the node.",
-			Expect: body.Name, Token: t, TTLSeconds: 30,
-		})
+	op := confirmOp{
+		Verb: "drain", Resource: "node/" + body.Name,
+		Style: "typed_name", Expect: body.Name,
+		Prompt: "Type the node name to drain it",
+		Detail: "This will evict every pod from the node.",
+		Digest: argvDigest(sess, "drain", args),
+	}
+	if !s.gateConfirm(w, sess, op, body.ConfirmToken, body.ConfirmValue) {
 		return
 	}
-	if body.ConfirmToken != "" {
-		if _, ok := s.pty.Consume(body.ConfirmToken, body.ConfirmValue); !ok {
-			s.render.Error(w, http.StatusGone, "confirmation did not match")
-			return
-		}
-	}
-	start := time.Now()
-	output, code := s.runKubectlCaptured(r, args)
-	s.recordWebAudit("drain", args, code, time.Since(start))
-	s.render.JSON(w, statusForExit(code), map[string]any{"output": output, "exit_code": code})
+	s.finish(w, r, "drain", args)
 }
 
 func (s *Server) apiCordon(w http.ResponseWriter, r *http.Request)   { s.cordonLike(w, r, "cordon") }
@@ -286,33 +266,38 @@ func (s *Server) apiUncordon(w http.ResponseWriter, r *http.Request) { s.cordonL
 
 func (s *Server) cordonLike(w http.ResponseWriter, r *http.Request, verb string) {
 	var body destructiveRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name) {
 		s.render.Error(w, http.StatusBadRequest, "name required")
 		return
 	}
+	sess := s.readSession(r)
 	args := []string{verb, body.Name}
-	if s.gateForbidden(w, verb, args) {
+	if s.gateForbidden(w, sess, verb, args) {
 		return
 	}
-	if body.ConfirmToken == "" && !body.Yes {
-		t := s.pty.Issue(ptyConfirmEntry{Verb: verb, Resource: "node/" + body.Name, Argv: args})
-		s.render.JSON(w, http.StatusOK, confirmationResponse{
-			Status: "needs_confirmation", Style: "yes_no",
-			Prompt: strings.Title(verb) + " node " + body.Name + "?",
-			Token:  t, TTLSeconds: 30,
-		})
+	op := confirmOp{
+		Verb: verb, Resource: "node/" + body.Name, Name: body.Name,
+		Style:  "yes_no",
+		Prompt: verbTitle(verb) + " node " + body.Name + "?",
+		Digest: argvDigest(sess, verb, args),
+	}
+	if !s.gateConfirm(w, sess, op, body.ConfirmToken, body.ConfirmValue) {
 		return
 	}
-	if body.ConfirmToken != "" {
-		if _, ok := s.pty.Consume(body.ConfirmToken, ""); !ok {
-			s.render.Error(w, http.StatusGone, "confirmation expired")
-			return
-		}
+	s.finish(w, r, verb, args)
+}
+
+// verbTitle upper-cases the first letter of an ASCII verb (strings.Title is
+// deprecated and Unicode-aware behavior is not needed here).
+func verbTitle(v string) string {
+	if v == "" {
+		return v
 	}
-	start := time.Now()
-	output, code := s.runKubectlCaptured(r, args)
-	s.recordWebAudit(verb, args, code, time.Since(start))
-	s.render.JSON(w, statusForExit(code), map[string]any{"output": output, "exit_code": code})
+	b := []byte(v)
+	if b[0] >= 'a' && b[0] <= 'z' {
+		b[0] -= 'a' - 'A'
+	}
+	return string(b)
 }
 
 // statusForExit picks an HTTP status that reflects whether kubectl exited

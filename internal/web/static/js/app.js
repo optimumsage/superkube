@@ -1339,7 +1339,7 @@
       term: '', hits: [], picked: null,
       releaseName: '', namespace: 'default',
       createNamespace: false, wait: false, atomic: false,
-      values: '', rendered: '', confirmToken: '',
+      values: '', rendered: '', confirmToken: '', confirmExpect: '',
       status: '', busy: false, result: '',
       goto(p) { gotoPath(p); },
       async search() {
@@ -1385,6 +1385,8 @@
           if (!r.ok) { this.status = 'preview failed: ' + (d.error || ''); return; }
           this.rendered = d.rendered || '';
           this.confirmToken = d.confirm_token || '';
+          // Policy may require typing the release name (require_typed_confirm).
+          this.confirmExpect = d.expect || '';
           this.status = 'review the rendered manifest, then commit';
         } catch (e) {
           this.status = 'preview failed: ' + e;
@@ -1394,6 +1396,11 @@
       },
       async commit() {
         if (!this.confirmToken) return;
+        let typed = '';
+        if (this.confirmExpect) {
+          typed = window.prompt('Type ' + this.confirmExpect + ' to confirm the install', '');
+          if (typed == null) return;
+        }
         this.busy = true; this.status = 'installing…';
         try {
           const r = await fetch('/api/v1/helm/install/commit', {
@@ -1405,6 +1412,7 @@
               create_namespace: this.createNamespace,
               wait: this.wait, atomic: this.atomic,
               confirm_token: this.confirmToken,
+              confirm_value: typed,
             }),
           });
           const d = await r.json();
@@ -1651,10 +1659,10 @@
     const name = rowName(headers, row);
     const ns = rowNs(headers, row);
     if (!name) return;
-    // history is an inspection — POST with yes=true so the server doesn't issue a confirm token.
+    // history is a read-only inspection; the server never asks to confirm it.
     const r = await fetch('/api/v1/destructive/rollout/history', {
       method: 'POST', headers: csrfHeaders(),
-      body: JSON.stringify({ kind, name, namespace: ns, yes: true }),
+      body: JSON.stringify({ kind, name, namespace: ns }),
     });
     const d = await r.json().catch(() => ({}));
     window.alert(d.output || 'No history');

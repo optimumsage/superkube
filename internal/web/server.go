@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,11 +34,17 @@ import (
 // these as interfaces/functions instead of direct imports of internal/cli
 // avoids a circular dependency.
 type Deps struct {
-	Loader     kube.Loader
-	Runner     *kubectl.Runner
-	Helm       *helm.Runner // nil when the helm binary is not installed; handlers degrade gracefully
-	Policy     func() guardrail.Policy
-	Banner     func() (text, kind string) // mirrors cli.ActiveBanner
+	Loader kube.Loader
+	Runner *kubectl.Runner
+	Helm   *helm.Runner // nil when the helm binary is not installed; handlers degrade gracefully
+	// PolicyFor resolves the effective guardrail policy for a kube context.
+	// It is called per request with the *session's* context (cookie-selected,
+	// which can differ from the one `sk web` started in). An error means the
+	// config could not be evaluated and destructive actions must be refused.
+	// nil means "no policy" (tests / embedders).
+	PolicyFor func(kubeContext string) (guardrail.Policy, error)
+	// BannerFor returns the prod-context banner for a kube context.
+	BannerFor  func(kubeContext string) (text, kind string)
 	Audit      func(audit.Event)
 	AIProvider func() (ai.Provider, error) // returns the resolved provider for this invocation
 
@@ -47,7 +54,10 @@ type Deps struct {
 	Namespace  string
 	Kubeconfig string
 	NoContext  bool
-	Yes        bool
+	// Yes mirrors `sk web --yes`: the server operator (not the browser) opted
+	// out of confirmation prompts. It never overrides policy `forbid` rules
+	// nor the typed DELETE phrase for `delete --all`.
+	Yes bool
 }
 
 // Config describes how the server binds. Constructed from `sk web` flags.
@@ -70,6 +80,7 @@ type Server struct {
 	csrf   *csrfStore
 	pty    *ptyConfirmStore
 	render renderFns
+	hosts  []string // acceptable Host header values (DNS-rebind defense)
 }
 
 // New builds a Server. It parses the embedded templates and registers all
@@ -96,6 +107,9 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		pty:   newPtyConfirmStore(30 * time.Second),
 	}
 	s.render = newRenderFns(tmpls)
+	hostname, _ := os.Hostname()
+	addrs, _ := net.InterfaceAddrs()
+	s.hosts = computeAllowedHosts(cfg.Bind, addrs, hostname)
 	s.registerRoutes()
 	return s, nil
 }
@@ -103,29 +117,28 @@ func New(cfg Config, deps Deps) (*Server, error) {
 // Run binds the listener, optionally opens the browser, and serves until ctx
 // is cancelled. Returns the cause if Serve fails for any non-graceful reason.
 func (s *Server) Run(ctx context.Context) error {
-	addr := fmt.Sprintf("%s:%d", s.cfg.Bind, s.cfg.Port)
+	addr := net.JoinHostPort(strings.Trim(s.cfg.Bind, "[]"), strconv.Itoa(s.cfg.Port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	s.addr = ln.Addr().String()
-	host := s.cfg.Bind
-	if isLoopback(host) {
-		host = "127.0.0.1"
-	}
 	port := s.addr[strings.LastIndex(s.addr, ":")+1:]
-	s.url = fmt.Sprintf("http://%s:%s", host, port)
+	base := "http://" + net.JoinHostPort(s.publicHost(), port)
+	s.url = base
 	if s.cfg.Token != "" {
 		s.url += "/?token=" + s.cfg.Token
 	}
 
-	handler := s.middleware(s.mux)
-	s.srv = &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	s.srv = newHTTPServer(s.middleware(s.mux))
 
-	fmt.Fprintf(os.Stderr, "superkube web listening at %s\n", s.url)
+	// Service managers capture stderr into a log file; never write the
+	// credentialed URL there. On a terminal the operator needs it to log in.
+	if s.cfg.Token != "" && !stderrIsTTY() {
+		_, _ = fmt.Fprintf(startupOut, "superkube web listening at %s (auth token required; it was not printed because stderr is not a terminal)\n", base)
+	} else {
+		_, _ = fmt.Fprintf(startupOut, "superkube web listening at %s\n", s.url)
+	}
 	if !s.cfg.NoOpen {
 		if err := openBrowser(s.url); err != nil {
 			fmt.Fprintf(os.Stderr, "(could not auto-open browser: %v)\n", err)
@@ -158,18 +171,6 @@ func (s *Server) Addr() string { return s.addr }
 // URL returns the canonical URL to open in a browser.
 func (s *Server) URL() string { return s.url }
 
-// allowedHosts reports the set of acceptable Host header values. We use this
-// for DNS-rebind protection: even though the listener is bound to 127.0.0.1
-// by default, a malicious page can resolve a name like sk.attacker.com to
-// 127.0.0.1 and pivot through the browser. Restricting Host stops that.
-func (s *Server) allowedHosts() []string {
-	hosts := []string{"127.0.0.1", "localhost", "[::1]", "::1"}
-	if !isLoopback(s.cfg.Bind) {
-		hosts = append(hosts, s.cfg.Bind)
-	}
-	return hosts
-}
-
 // isLoopback reports whether bind is one of the loopback identifiers we trust
 // to need no token by default.
 func isLoopback(bind string) bool {
@@ -199,15 +200,6 @@ func readEmbedFS() (fs.FS, error) {
 	}
 	return sub, nil
 }
-
-// snap captures a small per-request snapshot of mutable Deps state. Handlers
-// pass this around instead of touching s.deps directly, which keeps tests
-// honest (a test server can drive a snapshot without poking package globals).
-type snap struct {
-	Deps
-}
-
-func (s *Server) snapshot() snap { return snap{Deps: s.deps} }
 
 // once-only template parse guard so tests that build many servers don't
 // re-parse the same FS repeatedly.

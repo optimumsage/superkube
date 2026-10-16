@@ -503,7 +503,7 @@ func parsePortNumber(s string) int32 {
 		if r < '0' || r > '9' {
 			return 0
 		}
-		n = n*10 + int32(r-'0')
+		n = n*10 + (r - '0')
 		if n > 65535 {
 			return 0
 		}

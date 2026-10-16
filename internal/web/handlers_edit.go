@@ -3,13 +3,11 @@ package web
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/optimumsage/superkube/internal/guardrail"
 	"github.com/optimumsage/superkube/internal/kubectl"
 )
 
@@ -53,166 +51,6 @@ func (s *Server) fragResourceEdit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// apiResourceEditPreview computes the diff between the submitted YAML and the
-// live object using kubectl diff, then (if there are changes) returns a
-// single-use confirmation token. Mirrors apiApplyPreview.
-//
-// The body accepts either `yaml` (textual editor mode) or `form` +
-// `original_yaml` (form editor mode). When `form` is set we merge it into the
-// original-yaml-derived typed object and re-marshal before diffing — this
-// keeps spec/status fields the UI doesn't expose intact.
-func (s *Server) apiResourceEditPreview(w http.ResponseWriter, r *http.Request) {
-	kind := r.PathValue("kind")
-	ns := r.PathValue("ns")
-	name := r.PathValue("name")
-	if !editableKinds[kind] {
-		s.render.Error(w, http.StatusNotFound, "edit not supported for kind "+kind)
-		return
-	}
-	var body struct {
-		YAML         string          `json:"yaml"`
-		Form         json.RawMessage `json:"form"`
-		OriginalYAML string          `json:"original_yaml"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		s.render.Error(w, http.StatusBadRequest, "invalid body")
-		return
-	}
-	yamlText := body.YAML
-	if len(body.Form) > 0 && string(body.Form) != "null" {
-		built, err := buildYAMLFromForm(kind, []byte(body.OriginalYAML), body.Form)
-		if err != nil {
-			s.render.Error(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		yamlText = string(built)
-	}
-	if strings.TrimSpace(yamlText) == "" {
-		s.render.Error(w, http.StatusBadRequest, "yaml or form required")
-		return
-	}
-	body.YAML = yamlText
-
-	// Forbid-policy: edit shares the same gate as delete/apply — a context
-	// flagged forbidden cannot be edited from the web UI either.
-	if s.gateForbidden(w, "edit", []string{kind, name}) {
-		return
-	}
-
-	tmp, cleanup, err := writeTempYAML(body.YAML)
-	if err != nil {
-		s.render.Error(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	defer cleanup()
-
-	sess := s.readSession(r)
-	args := sess.prependGlobalFlags([]string{"-f", tmp})
-
-	var buf bytes.Buffer
-	result, err := guardrail.PreviewApply(r.Context(), s.deps.Runner, args, &buf)
-	if err != nil {
-		s.render.Error(w, http.StatusBadGateway, err.Error())
-		return
-	}
-
-	if !result.HasChanges {
-		s.render.JSON(w, http.StatusOK, map[string]any{
-			"status": "no_changes",
-			"diff":   buf.String(),
-		})
-		return
-	}
-
-	token := s.pty.Issue(ptyConfirmEntry{
-		Verb:     "edit",
-		Resource: kind + "/" + ns + "/" + name,
-		Argv:     args,
-	})
-
-	s.render.JSON(w, http.StatusOK, map[string]any{
-		"status":        "needs_confirmation",
-		"diff":          buf.String(),
-		"diff_html":     diffToHTML(buf.String()),
-		"confirm_token": token,
-		"ttl":           30,
-	})
-}
-
-// apiResourceEditCommit consumes the token from apiResourceEditPreview and
-// applies the new YAML. Identical token-consumption guarantees as apiApplyCommit.
-//
-// Accepts the same two body shapes as preview: `{yaml,confirm_token}` (text
-// mode) or `{form,original_yaml,confirm_token}` (form mode).
-func (s *Server) apiResourceEditCommit(w http.ResponseWriter, r *http.Request) {
-	kind := r.PathValue("kind")
-	ns := r.PathValue("ns")
-	name := r.PathValue("name")
-	if !editableKinds[kind] {
-		s.render.Error(w, http.StatusNotFound, "edit not supported for kind "+kind)
-		return
-	}
-	var body struct {
-		YAML         string          `json:"yaml"`
-		Form         json.RawMessage `json:"form"`
-		OriginalYAML string          `json:"original_yaml"`
-		Token        string          `json:"confirm_token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		s.render.Error(w, http.StatusBadRequest, "invalid body")
-		return
-	}
-	if _, ok := s.pty.Consume(body.Token, ""); !ok {
-		s.render.Error(w, http.StatusGone, "confirmation expired or invalid")
-		return
-	}
-	yamlText := body.YAML
-	if len(body.Form) > 0 && string(body.Form) != "null" {
-		built, err := buildYAMLFromForm(kind, []byte(body.OriginalYAML), body.Form)
-		if err != nil {
-			s.render.Error(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		yamlText = string(built)
-	}
-	if strings.TrimSpace(yamlText) == "" {
-		s.render.Error(w, http.StatusBadRequest, "yaml or form required")
-		return
-	}
-	body.YAML = yamlText
-
-	tmp, cleanup, err := writeTempYAML(body.YAML)
-	if err != nil {
-		s.render.Error(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	defer cleanup()
-
-	sess := s.readSession(r)
-	args := sess.prependGlobalFlags([]string{"apply", "-f", tmp})
-
-	var out bytes.Buffer
-	start := time.Now()
-	runErr := s.deps.Runner.Run(r.Context(), args, kubectl.RunOpts{Stdout: &out, Stderr: &out})
-	exitCode := 0
-	if runErr != nil {
-		exitCode = exitCodeOf(runErr)
-	}
-	s.recordWebAudit("edit", []string{kind, ns + "/" + name}, exitCode, time.Since(start))
-
-	if runErr != nil && exitCode != 0 {
-		s.render.JSON(w, http.StatusBadGateway, map[string]any{
-			"status": "error",
-			"output": out.String(),
-		})
-		return
-	}
-	s.render.JSON(w, http.StatusOK, map[string]any{
-		"status": "applied",
-		"output": out.String(),
-	})
-}
-
 // apiSecretYAMLRevealed returns the secret's YAML with `data:` values base64-
 // decoded. Routed via apiResourceYAML when `?reveal=1` is set for a secret.
 //
@@ -233,7 +71,7 @@ func (s *Server) apiSecretYAMLRevealed(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		exitCode = exitCodeOf(err)
 	}
-	s.recordWebAudit("secret-reveal", []string{ns + "/" + name}, exitCode, time.Since(start))
+	s.recordWebAudit(r, "secret-reveal", []string{ns + "/" + name}, exitCode, time.Since(start))
 
 	if err != nil && exitCode != 0 && buf.Len() == 0 {
 		s.render.Error(w, http.StatusBadGateway, err.Error())

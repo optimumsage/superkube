@@ -2,40 +2,35 @@ package web
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/optimumsage/superkube/internal/kubectl"
 )
 
-// apiPassthrough runs an arbitrary kubectl command and returns the captured
+// apiPassthrough runs a read-only kubectl command and returns the captured
 // output. Used by the command palette (Ctrl+K) so the web UI can match every
 // CLI use case, including verbs we haven't built bespoke screens for.
 //
-// We deliberately reject the destructive subset here — the palette is meant
-// for read-only inspection. Destructive verbs route through the typed-confirm
+// We deliberately reject everything that can write — the palette is meant for
+// read-only inspection. Destructive verbs route through the typed-confirm
 // handlers instead.
 func (s *Server) apiPassthrough(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Argv []string `json:"argv"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Argv) == 0 {
+	if err := s.decodeJSON(w, r, &body); err != nil || len(body.Argv) == 0 {
 		s.render.Error(w, http.StatusBadRequest, "argv required")
 		return
 	}
-	if !palettePassthroughAllowed(body.Argv[0]) {
+	if !palettePassthroughAllowed(body.Argv) {
 		s.render.Error(w, http.StatusForbidden,
-			"use the dedicated page for destructive verbs ("+body.Argv[0]+")")
+			"use the dedicated page for destructive verbs ("+strings.Join(body.Argv[:min(len(body.Argv), 2)], " ")+")")
 		return
 	}
 	sess := s.readSession(r)
-	args := body.Argv
-	if !hasFlagN(args) {
-		args = sess.prependGlobalFlags(args)
-	} else {
-		args = sess.prependGlobalFlagsNoNS(args)
-	}
+	args := sess.kubectlArgs(body.Argv)
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
 	err := s.deps.Runner.Run(r.Context(), args, kubectl.RunOpts{Stdout: &stdout, Stderr: &stderr})
@@ -43,7 +38,7 @@ func (s *Server) apiPassthrough(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		code = exitCodeOf(err)
 	}
-	s.recordWebAudit("passthrough", body.Argv, code, time.Since(start))
+	s.recordWebAudit(r, "passthrough", body.Argv, code, time.Since(start))
 	s.render.JSON(w, http.StatusOK, map[string]any{
 		"stdout":    stdout.String(),
 		"stderr":    stderr.String(),
@@ -51,15 +46,45 @@ func (s *Server) apiPassthrough(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// palettePassthroughAllowed gatekeeps which verbs the command palette will
-// forward. Read-only verbs only — destructive ones must use a real screen.
-func palettePassthroughAllowed(verb string) bool {
-	switch verb {
-	case "get", "describe", "explain", "events", "top", "config", "api-resources",
-		"api-versions", "version", "cluster-info", "auth", "diff", "wait":
+// palettePassthroughAllowed gatekeeps what the command palette will forward:
+// read-only invocations only. Sub-commands matter — `config` also contains
+// set-credentials / delete-context / use-context, and `auth` contains
+// `reconcile`, which writes RBAC objects.
+func palettePassthroughAllowed(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	switch argv[0] {
+	case "get", "describe", "explain", "events", "top", "api-resources",
+		"api-versions", "version", "cluster-info", "diff", "wait":
 		return true
+	case "config":
+		if len(argv) < 2 {
+			return false
+		}
+		switch argv[1] {
+		case "get-contexts", "current-context":
+			return true
+		case "view":
+			// --raw reveals embedded credentials; --flatten inlines cert and
+			// key material.
+			for _, a := range argv[2:] {
+				if flagIs(a, "--raw") || flagIs(a, "--flatten") {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	case "auth":
+		return len(argv) >= 2 && (argv[1] == "can-i" || argv[1] == "whoami")
 	}
 	return false
+}
+
+// flagIs reports whether arg is the named long flag, bare or with =value.
+func flagIs(arg, name string) bool {
+	return arg == name || strings.HasPrefix(arg, name+"=")
 }
 
 // apiUpgradeCheck reports the current version. A real release check would

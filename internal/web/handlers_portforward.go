@@ -2,7 +2,6 @@ package web
 
 import (
 	"bufio"
-	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -42,11 +41,14 @@ func (s *Server) apiPFStart(w http.ResponseWriter, r *http.Request) {
 		Namespace string   `json:"namespace"`
 		Address   string   `json:"address"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Target == "" || len(body.Ports) == 0 {
+	if err := s.decodeJSON(w, r, &body); err != nil || body.Target == "" || len(body.Ports) == 0 {
 		s.render.Error(w, http.StatusBadRequest, "target + ports required")
 		return
 	}
 	sess := s.readSession(r)
+	if s.gateForbidden(w, sess, "port-forward", append([]string{body.Target}, body.Ports...)) {
+		return
+	}
 	if body.Namespace == "" {
 		body.Namespace = sess.Namespace
 	}
@@ -62,7 +64,7 @@ func (s *Server) apiPFStart(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	s.recordWebAudit("pf-start", []string{body.Target}, 0, 0)
+	s.recordWebAudit(r, "pf-start", []string{body.Target}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]any{
 		"id": e.ID, "pid": e.PID, "log_path": e.LogPath,
 	})
@@ -76,7 +78,7 @@ func (s *Server) apiPFStop(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordWebAudit("pf-stop", []string{id}, 0, 0)
+	s.recordWebAudit(r, "pf-stop", []string{id}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]any{"stopped": len(stopped)})
 }
 
@@ -106,7 +108,7 @@ func (s *Server) streamPFLogs(w http.ResponseWriter, r *http.Request) {
 		_ = sse.Send("error", map[string]string{"message": err.Error()})
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Initial dump.
 	sc := bufio.NewScanner(f)
