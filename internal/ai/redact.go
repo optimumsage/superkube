@@ -10,24 +10,50 @@ import (
 // can still leak data via the prompt itself. Document that explicitly.
 //
 // What we mask:
+//   - PEM private-key blocks (whole block, or to end of text if truncated)
 //   - JWT-shaped tokens (eyJ... three base64 segments)
 //   - "Bearer XXXX" / "Basic XXXX" auth headers
-//   - YAML/JSON values for keys whose names match (?i)(token|key|secret|
-//     password|credential|auth)
-//   - environment-variable lines (KEY=VALUE) where KEY matches the same regex
+//   - AWS access key IDs (AKIA/ASIA + 16 chars)
+//   - the password in URLs with userinfo (scheme://user:PW@host)
+//   - YAML/JSON/INI/env values for keys whose names match nameRE (token, key,
+//     secret, password, passwd, credential, auth, dockerconfigjson), including
+//     dotted keys (tls.key), `export NAME=value`, and mid-line name=value
+//   - pod-spec env entries: `- name: DB_PASSWORD` followed by `value: ...`
 func Redact(s string) string {
+	s = pemRE.ReplaceAllString(s, "<redacted-private-key>")
 	s = jwtRE.ReplaceAllString(s, "<redacted-jwt>")
 	s = authHeaderRE.ReplaceAllString(s, "${1} <redacted>")
+	s = awsKeyIDRE.ReplaceAllString(s, "<redacted-aws-key-id>")
+	s = urlUserinfoRE.ReplaceAllString(s, "${1}<redacted>@")
+	s = jsonEnvPairRE.ReplaceAllString(s, `${1}"<redacted>"`)
+	s = jsonSecretRE.ReplaceAllString(s, `${1}"<redacted>"`)
+	s = envNameValueRE.ReplaceAllString(s, "${1}<redacted>")
 	s = secretYAMLRE.ReplaceAllStringFunc(s, redactSecretYAML)
 	s = secretEnvRE.ReplaceAllStringFunc(s, redactSecretEnv)
+	s = inlinePairRE.ReplaceAllString(s, "${1}=<redacted>")
 	return s
 }
 
+// nameRE is the shared (lowercase-insensitive) credential-name fragment.
+const nameRE = `(?:token|key|secret|passw(?:or)?d|credential|auth|dockerconfigjson)`
+
 var (
-	jwtRE        = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`)
-	authHeaderRE = regexp.MustCompile(`(?i)(Bearer|Basic)\s+[A-Za-z0-9+/=._-]+`)
-	secretYAMLRE = regexp.MustCompile(`(?im)^(\s*[A-Za-z0-9_-]*(?:token|key|secret|password|credential|auth)[A-Za-z0-9_-]*)\s*:\s*(.+)$`)
-	secretEnvRE  = regexp.MustCompile(`(?im)^([A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH)[A-Za-z0-9_]*)=(.+)$`)
+	pemRE         = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\z)`)
+	jwtRE         = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`)
+	authHeaderRE  = regexp.MustCompile(`(?i)(Bearer|Basic)\s+[A-Za-z0-9+/=._-]+`)
+	awsKeyIDRE    = regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)
+	urlUserinfoRE = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://[^\s:/@]*:)[^\s@/]+@`)
+	// {"password":"x"} / {"apiKey": 123}: quoted JSON key, string or bare value.
+	jsonSecretRE = regexp.MustCompile(`(?i)("[A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*"\s*:\s*)(?:"(?:[^"\\]|\\.)*"|[^\s,}\]]+)`)
+	// {"name":"DB_PASSWORD","value":"x"} (pod-spec env as JSON).
+	jsonEnvPairRE = regexp.MustCompile(`(?i)("name"\s*:\s*"[A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*"\s*,\s*"value"\s*:\s*)"(?:[^"\\]|\\.)*"`)
+	// - name: DB_PASSWORD\n  value: x (pod-spec env as YAML).
+	envNameValueRE = regexp.MustCompile(`(?im)(^[ \t]*-?[ \t]*name:[ \t]*["']?[A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*["']?[ \t]*\r?\n[ \t]*value:[ \t]*)\S.*$`)
+	secretYAMLRE   = regexp.MustCompile(`(?im)^(\s*[A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*)\s*:\s*(.+)$`)
+	// NAME=value, `export NAME=value`, and INI `name = value` at line start.
+	secretEnvRE = regexp.MustCompile(`(?im)^(\s*(?:export\s+)?[A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*)\s*=\s*(.+)$`)
+	// name=value anywhere in a line (logs, URLs' query strings).
+	inlinePairRE = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*)=("[^"]*"|'[^']*'|[^\s&"',;]+)`)
 )
 
 func redactSecretYAML(line string) string {
