@@ -691,8 +691,8 @@ func childByName(cmd *cobra.Command, name string) *cobra.Command {
 // applied through Flags by scanGlobalFlags (--yes, --plain, --audit,
 // --ai, --ai-timeout, --no-context, --tools, --verbose) are consumed here
 // (keeping `--ai claude` in argv would leak `claude` into kubectl args);
-// EVERYTHING else (kubectl globals, --dry-run, --help, ...) is moved to the
-// end of the command, before any bare `--`, where DisableFlagParsing commands
+// EVERYTHING else (kubectl globals, --dry-run, --help, ...) is moved to just
+// after the command chain, ahead of the leaf's own args, where DisableFlagParsing commands
 // forward it to kubectl and honor it. Flags interleaved with the subcommand
 // chain (`configmap -n kube-system edit x`) are moved the same way, so the
 // leaf and its policy check always see them. kubectl's `-v N` forms are
@@ -746,18 +746,12 @@ func cobraArgs(root *cobra.Command, args []string, verbIdx int, hasVerb bool) []
 		rest = append(rest, args[j:]...)
 		break
 	}
+	// Moved flags go right after the chain, ahead of the leaf's own argv, so
+	// every flag keeps its original order relative to everything after it
+	// (pflag's last-occurrence-wins must resolve exactly as the user typed).
 	out := append([]string(nil), chain...)
-	// Place moved flags before a bare `--` if the leaf argv has one.
-	cut := len(rest)
-	for k, a := range rest {
-		if a == "--" {
-			cut = k
-			break
-		}
-	}
-	out = append(out, rest[:cut]...)
 	out = append(out, moved...)
-	out = append(out, rest[cut:]...)
+	out = append(out, rest...)
 	return normalizeVerbosity(out, 0, false)
 }
 
