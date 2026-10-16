@@ -96,3 +96,16 @@ func TestLoopbackBindNeverRefreshes(t *testing.T) {
 		t.Fatalf("status %d called=%v", got, called)
 	}
 }
+
+func TestBadRevisionRejectsZero(t *testing.T) {
+	s := newTestServerWithHelm(t)
+	for _, rev := range []string{"0", "00"} {
+		req := httptest.NewRequest("GET", "/api/v1/helm/releases/default/x/manifest?revision="+rev, nil)
+		rr := httptest.NewRecorder()
+		req.Host = "127.0.0.1"
+		s.middleware(s.mux).ServeHTTP(rr, req)
+		if rr.Code != 400 {
+			t.Errorf("revision=%s: %d", rev, rr.Code)
+		}
+	}
+}

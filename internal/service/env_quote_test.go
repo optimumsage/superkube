@@ -11,6 +11,7 @@ func TestQuoteSystemdEnv(t *testing.T) {
 		{"X", "100%", "X=100%%"},
 		{"X", "a b%", `"X=a b%%"`},
 		{"X", "line1\nline2", `"X=line1 line2"`},
+		{"X", "a\r\nb", `"X=a  b"`},
 	}
 	for _, c := range cases {
 		if got := quoteSystemdEnv(c.k, c.v); got != c.want {

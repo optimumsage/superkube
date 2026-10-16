@@ -68,6 +68,10 @@ func (s *Server) badRevision(w http.ResponseWriter, r *http.Request) bool {
 	if rev == "" {
 		return false
 	}
+	if strings.Trim(rev, "0") == "" {
+		s.render.Error(w, http.StatusBadRequest, "invalid revision")
+		return true
+	}
 	for _, c := range rev {
 		if c < '0' || c > '9' {
 			s.render.Error(w, http.StatusBadRequest, "invalid revision")

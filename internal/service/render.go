@@ -142,8 +142,7 @@ func quoteSystemd(s string) string {
 // doubled because unit files expand %-specifiers. Plain values stay bare so
 // the common case reads naturally.
 func quoteSystemdEnv(k, v string) string {
-	v = strings.ReplaceAll(v, "\n", " ")
-	assign := k + "=" + strings.ReplaceAll(v, "%", "%%")
+	assign := k + "=" + escapeSystemdValue(v)
 	if !strings.ContainsAny(assign, " \t\"'\\") {
 		return assign
 	}
