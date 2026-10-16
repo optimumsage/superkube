@@ -20,6 +20,7 @@ import (
 //     dotted keys (tls.key), `export NAME=value`, and mid-line name=value
 //   - pod-spec env entries: `- name: DB_PASSWORD` followed by `value: ...`
 func Redact(s string) string {
+	s = redactBlockScalars(s)
 	s = pemRE.ReplaceAllString(s, "<redacted-private-key>")
 	s = jwtRE.ReplaceAllString(s, "<redacted-jwt>")
 	s = authHeaderRE.ReplaceAllString(s, "${1} <redacted>")
@@ -55,6 +56,45 @@ var (
 	// name=value anywhere in a line (logs, URLs' query strings).
 	inlinePairRE = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*)=("[^"]*"|'[^']*'|[^\s&"',;]+)`)
 )
+
+// blockHeaderRE matches `key: |`, `key: >-`, `key: |2+` etc. (value is a YAML
+// block scalar whose body is on the following, more-indented lines).
+var (
+	blockHeaderRE = regexp.MustCompile(`^(\s*(?:-\s+)?)([A-Za-z0-9_.-]+)\s*:\s*[|>][+-]?[0-9]?[+-]?\s*$`)
+	nameKeyRE     = regexp.MustCompile(`(?i)^[A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*$`)
+	envNameLineRE = regexp.MustCompile(`(?i)^\s*-?\s*name:\s*["']?[A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*["']?\s*$`)
+)
+
+// redactBlockScalars masks the body of block scalars whose key is
+// credential-named (`tls.key: |`) or is the `value:` of a credential-named
+// pod-spec env entry. The line-oriented regexes below only see the header
+// line, so without this the indented body would pass through.
+func redactBlockScalars(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	prev := ""
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		m := blockHeaderRE.FindStringSubmatch(line)
+		sensitive := m != nil && (nameKeyRE.MatchString(m[2]) || (m[2] == "value" && envNameLineRE.MatchString(prev)))
+		if !sensitive {
+			out = append(out, line)
+			prev = line
+			continue
+		}
+		out = append(out, m[1]+m[2]+": <redacted>")
+		indent := len(m[1])
+		for i+1 < len(lines) {
+			next := lines[i+1]
+			if strings.TrimSpace(next) != "" && len(next)-len(strings.TrimLeft(next, " \t")) <= indent {
+				break
+			}
+			i++
+		}
+		prev = line
+	}
+	return strings.Join(out, "\n")
+}
 
 func redactSecretYAML(line string) string {
 	m := secretYAMLRE.FindStringSubmatch(line)
