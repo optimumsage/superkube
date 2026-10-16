@@ -92,7 +92,7 @@ func (s *Server) streamAudit(w http.ResponseWriter, r *http.Request) {
 		_ = sse.Send("end", map[string]string{"reason": "no log file"})
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	pos, _ := f.Seek(0, io.SeekEnd)
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
@@ -172,7 +172,7 @@ func readAuditFiltered(f auditFilters) ([]audit.Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	var out []audit.Event
 	sc := bufio.NewScanner(file)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)

@@ -27,6 +27,7 @@ func newSSE(w http.ResponseWriter) (*sseWriter, error) {
 	if !ok {
 		return nil, fmt.Errorf("response writer does not support flushing")
 	}
+	clearStreamDeadlines(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")

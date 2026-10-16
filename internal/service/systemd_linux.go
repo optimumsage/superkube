@@ -53,7 +53,7 @@ func (m systemdManager) Install(spec Spec, force bool) error {
 	if err != nil {
 		return fmt.Errorf("render unit: %w", err)
 	}
-	if err := os.WriteFile(unitPath, body, 0o644); err != nil {
+	if err := writeUnitFile(unitPath, body); err != nil {
 		return fmt.Errorf("write unit: %w", err)
 	}
 	// daemon-reload so systemd picks up the new file; enable --now starts
