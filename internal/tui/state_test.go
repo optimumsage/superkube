@@ -8,7 +8,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func makePod(ns, name string, phase corev1.PodPhase, ready, total int) *corev1.Pod {
+func makePod(ns, name string, phase corev1.PodPhase, ready int) *corev1.Pod {
+	total := 1
 	cs := make([]corev1.ContainerStatus, 0, total)
 	for i := 0; i < total; i++ {
 		cs = append(cs, corev1.ContainerStatus{
@@ -29,9 +30,9 @@ func makePod(ns, name string, phase corev1.PodPhase, ready, total int) *corev1.P
 
 func TestStateUpsertDeleteSnapshot(t *testing.T) {
 	s := NewState()
-	s.Upsert(makePod("default", "b", corev1.PodRunning, 1, 1))
-	s.Upsert(makePod("default", "a", corev1.PodRunning, 1, 1))
-	s.Upsert(makePod("kube-system", "z", corev1.PodPending, 0, 1))
+	s.Upsert(makePod("default", "b", corev1.PodRunning, 1))
+	s.Upsert(makePod("default", "a", corev1.PodRunning, 1))
+	s.Upsert(makePod("kube-system", "z", corev1.PodPending, 0))
 
 	snap := podSnapshot(s)
 	if len(snap) != 3 {
@@ -46,7 +47,7 @@ func TestStateUpsertDeleteSnapshot(t *testing.T) {
 		}
 	}
 
-	s.Delete(makePod("default", "a", corev1.PodRunning, 1, 1))
+	s.Delete(makePod("default", "a", corev1.PodRunning, 1))
 	if got := len(podSnapshot(s)); got != 2 {
 		t.Errorf("after delete len = %d, want 2", got)
 	}
@@ -54,8 +55,8 @@ func TestStateUpsertDeleteSnapshot(t *testing.T) {
 
 func TestStateUpdatesExistingPod(t *testing.T) {
 	s := NewState()
-	s.Upsert(makePod("default", "p", corev1.PodPending, 0, 1))
-	s.Upsert(makePod("default", "p", corev1.PodRunning, 1, 1))
+	s.Upsert(makePod("default", "p", corev1.PodPending, 0))
+	s.Upsert(makePod("default", "p", corev1.PodRunning, 1))
 	snap := podSnapshot(s)
 	if len(snap) != 1 {
 		t.Fatalf("want 1 pod after re-upsert, got %d", len(snap))
@@ -67,7 +68,7 @@ func TestStateUpdatesExistingPod(t *testing.T) {
 
 func TestStateMultiKindIsolation(t *testing.T) {
 	s := NewState()
-	s.Upsert(makePod("default", "pod-a", corev1.PodRunning, 1, 1))
+	s.Upsert(makePod("default", "pod-a", corev1.PodRunning, 1))
 	s.UpsertRow(KindConfigMap, ConfigMapRow{Namespace: "default", Name: "cm-b", DataKeys: 3})
 	s.UpsertRow(KindConfigMap, ConfigMapRow{Namespace: "default", Name: "cm-a", DataKeys: 1})
 	s.UpsertRow(KindSecret, SecretRow{Namespace: "default", Name: "sec-x", Type: "Opaque", DataKeys: 2})

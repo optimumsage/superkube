@@ -175,8 +175,8 @@ func podOwnedBy(name, ns, ownerKind, ownerName string) *corev1.Pod {
 
 func podOwnedByReady(name, ns, ownerKind, ownerName string, lbls map[string]string, age time.Duration) *corev1.Pod {
 	p := podOwnedBy(name, ns, ownerKind, ownerName)
-	p.ObjectMeta.Labels = lbls
-	p.ObjectMeta.CreationTimestamp = metav1.NewTime(time.Now().Add(-age))
+	p.Labels = lbls
+	p.CreationTimestamp = metav1.NewTime(time.Now().Add(-age))
 	p.Status.Phase = corev1.PodRunning
 	p.Status.ContainerStatuses = []corev1.ContainerStatus{
 		{Name: "a", Ready: true},

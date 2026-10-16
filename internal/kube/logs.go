@@ -87,7 +87,7 @@ func tailMulti(ctx context.Context, cs kubernetes.Interface, opts MultiLogOpts, 
 	say := func(name string, i int, line string) {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		fmt.Fprintln(w, prefix(name, i)+line)
+		_, _ = fmt.Fprintln(w, prefix(name, i)+line)
 	}
 
 	var (
@@ -123,7 +123,7 @@ func tailMulti(ctx context.Context, cs kubernetes.Interface, opts MultiLogOpts, 
 					say(name, 0, "(error opening log stream: "+err.Error()+")")
 					return
 				}
-				defer stream.Close()
+				defer func() { _ = stream.Close() }()
 				if err := emitLines(stream, func(i int, line string) { say(name, i, line) }); err != nil && ctx.Err() == nil {
 					say(name, 0, "(log stream ended with error: "+err.Error()+")")
 				}

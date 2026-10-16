@@ -98,7 +98,7 @@ func (v *logViewer) start(ctx context.Context, cs kubernetes.Interface) tea.Cmd 
 		}
 		// No v.stream field: cancelling streamCtx closes the body, so stop()
 		// needs no handle on it (and sharing one across goroutines raced).
-		defer stream.Close()
+		defer func() { _ = stream.Close() }()
 		scanner := bufio.NewScanner(stream)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {

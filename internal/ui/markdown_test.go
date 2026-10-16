@@ -91,8 +91,8 @@ func TestMarkdownReassemblesChunkedLines(t *testing.T) {
 	var buf bytes.Buffer
 	mw := NewMarkdownWriter(&buf)
 	// A line split across writes (as model tokens arrive) must render once whole.
-	mw.Write([]byte("**bo"))
-	mw.Write([]byte("ld**\n"))
+	_, _ = mw.Write([]byte("**bo"))
+	_, _ = mw.Write([]byte("ld**\n"))
 	out := stripANSI(buf.String())
 	if strings.Contains(out, "*") || !strings.Contains(out, "bold") {
 		t.Fatalf("split emphasis should reassemble and strip markers; got %q", out)
