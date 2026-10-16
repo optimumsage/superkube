@@ -83,6 +83,7 @@ func (s *Server) registerRoutes() {
 	mux.HandleFunc("POST /api/v1/destructive/scale", s.apiScale)
 	mux.HandleFunc("POST /api/v1/destructive/rollout/{action}", s.apiRollout)
 	mux.HandleFunc("POST /api/v1/destructive/drain", s.apiDrain)
+	mux.HandleFunc("POST /api/v1/destructive/cronjob/trigger", s.apiCronJobTrigger)
 	mux.HandleFunc("POST /api/v1/destructive/cordon", s.apiCordon)
 	mux.HandleFunc("POST /api/v1/destructive/uncordon", s.apiUncordon)
 

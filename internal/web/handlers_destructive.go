@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/optimumsage/superkube/internal/kubectl"
@@ -309,4 +310,43 @@ func statusForExit(code int) int {
 		return http.StatusOK
 	}
 	return http.StatusBadGateway
+}
+
+// apiCronJobTrigger runs a CronJob once (`kubectl create job --from=cronjob/X`)
+// behind the same guardrails as every other mutation: forbid policy for the
+// "create" verb, a yes/no confirmation (typed name under require_typed_confirm)
+// bound to the exact cronjob + namespace, and an audit row. The generated job
+// name is chosen server-side after confirmation, so it is never part of the
+// confirmed digest.
+func (s *Server) apiCronJobTrigger(w http.ResponseWriter, r *http.Request) {
+	var body destructiveRequest
+	if err := s.decodeJSON(w, r, &body); err != nil || badToken(body.Name) || optBad(body.Namespace) {
+		s.render.Error(w, http.StatusBadRequest, "name required")
+		return
+	}
+	sess := s.readSession(r)
+	ns := body.Namespace
+	if ns == "" {
+		ns = sess.Namespace
+	}
+	policyArgs := []string{"job", "--from=cronjob/" + body.Name, "-n", ns}
+	if s.gateForbidden(w, sess, "create", policyArgs) {
+		return
+	}
+	op := confirmOp{
+		Verb: "create", Resource: "cronjob/" + body.Name, Name: body.Name,
+		Style:  "yes_no",
+		Prompt: fmt.Sprintf("Trigger a run of cronjob %s in namespace %s?", body.Name, ns),
+		Detail: "This creates a new Job from the CronJob's template.",
+		Digest: argvDigest(sess, "create", policyArgs),
+	}
+	if !s.gateConfirm(w, sess, op, body.ConfirmToken, body.ConfirmValue) {
+		return
+	}
+	jobName := fmt.Sprintf("%s-manual-%d", body.Name, time.Now().Unix())
+	if len(jobName) > 63 {
+		jobName = jobName[len(jobName)-63:]
+		jobName = strings.TrimLeft(jobName, "-.")
+	}
+	s.finish(w, r, "create", []string{"create", "job", jobName, "--from=cronjob/" + body.Name, "-n", ns})
 }

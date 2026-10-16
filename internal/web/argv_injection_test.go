@@ -111,3 +111,41 @@ func TestPortForwardPolicySeesEffectiveArgs(t *testing.T) {
 		t.Fatalf("code %d, want 403: %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestCronJobTriggerGuarded(t *testing.T) {
+	forbid := true
+	pol := func(string) (guardrail.Policy, error) {
+		if forbid {
+			return guardrail.Policy{Forbidden: []string{"create job"}}, nil
+		}
+		return guardrail.Policy{}, nil
+	}
+	e := newHardenEnv(t, hardenOpts{policy: pol})
+	const path = "/api/v1/destructive/cronjob/trigger"
+	if rr := e.do(t, path, `{"name":"--kubeconfig=/x"}`); rr.Code != http.StatusBadRequest {
+		t.Fatalf("flag-shaped name: %d", rr.Code)
+	}
+	if rr := e.do(t, path, `{"name":"nightly","namespace":"d"}`); rr.Code != http.StatusForbidden {
+		t.Fatalf("forbidden: %d", rr.Code)
+	}
+	forbid = false
+	first := decode[confirmationResponse](t, e.do(t, path, `{"name":"nightly","namespace":"d"}`))
+	if first.Status != "needs_confirmation" || len(e.calls()) != 0 {
+		t.Fatalf("first = %+v calls=%v", first, e.calls())
+	}
+	// A token for one cronjob cannot trigger another.
+	if rr := e.do(t, path, `{"name":"other","namespace":"d","confirm_token":"`+first.Token+`"}`); rr.Code != http.StatusGone {
+		t.Fatalf("mismatched token: %d", rr.Code)
+	}
+	first = decode[confirmationResponse](t, e.do(t, path, `{"name":"nightly","namespace":"d"}`))
+	if rr := e.do(t, path, `{"name":"nightly","namespace":"d","confirm_token":"`+first.Token+`"}`); rr.Code != http.StatusOK {
+		t.Fatalf("confirmed: %d %s", rr.Code, rr.Body.String())
+	}
+	c := e.calls()
+	if len(c) != 1 || !strings.Contains(c[0], "create job nightly-manual-") || !strings.Contains(c[0], "--from=cronjob/nightly") || !strings.Contains(c[0], "-n d") {
+		t.Fatalf("calls = %q", c)
+	}
+	if len(e.events) == 0 {
+		t.Fatal("no audit event")
+	}
+}

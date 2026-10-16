@@ -1776,14 +1776,10 @@
     const name = rowName(headers, row);
     const ns = rowNs(headers, row);
     if (!name) return;
-    const jobName = name + '-manual-' + Math.floor(Date.now() / 1000);
-    const r = await fetch('/api/v1/passthrough', {
-      method: 'POST', headers: csrfHeaders(),
-      body: JSON.stringify({ argv: ['create', 'job', jobName, '--from=cronjob/' + name, '-n', ns] }),
-    });
-    const d = await r.json().catch(() => ({}));
+    const d = await confirmThen('/api/v1/destructive/cronjob/trigger', { name, namespace: ns });
+    if (!d) return;
     const ok = (d.exit_code === 0);
-    Alpine.$data(document.body).toast(ok ? ('Triggered ' + jobName) : ('Trigger failed: ' + ((d.stderr || d.stdout || '')).slice(0, 200)), ok ? 'success' : 'error');
+    Alpine.$data(document.body).toast(ok ? ('Triggered a run of ' + name) : ('Trigger failed: ' + (d.output || d.error || '').slice(0, 200)), ok ? 'success' : 'error');
   }
 
   // Expose for templates that reference them via `kindActions(...)`.
