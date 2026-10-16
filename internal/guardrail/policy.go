@@ -194,10 +194,18 @@ type token struct {
 
 func ruleTokens(fields []string) []token {
 	var out []token
+	typeSeen := false
 	for i := 0; i < len(fields); i++ {
 		fs, ok := FlagsAt(fields, i)
 		if !ok {
-			out = append(out, token{word: normalizeWord(fields[i])})
+			w := fields[i]
+			// The first positional (past a rollout-style subcommand) is the
+			// resource TYPE slot; later ones are NAMES and stay verbatim.
+			if !typeSeen && !rolloutSubs[w] {
+				typeSeen = true
+				w = normalizeTypeWord(w)
+			}
+			out = append(out, token{word: w})
 			continue
 		}
 		for j, f := range fs {
@@ -230,14 +238,19 @@ func (t tokenSet) has(req token) bool {
 	return t.words[req.word]
 }
 
-// normalizeWord maps a positional to its canonical comparable form: a bare
-// kind is normalized (`ns` -> `namespace`), `kind/name` has only the kind
-// normalized (`pods.v1/x.y` -> `pod/x.y`; names keep their dots).
-func normalizeWord(w string) string {
+// normalizeTypeWord canonicalizes a resource-TYPE position: each
+// comma-separated type, or the part before `/` in TYPE/NAME, has its
+// .group[/version] suffix stripped and is singularized/aliased
+// (`pods.v1/x.y` -> `pod/x.y`). NAMES keep their dots and case.
+func normalizeTypeWord(w string) string {
 	if kind, name, ok := strings.Cut(w, "/"); ok {
 		return normalizeKind(kind) + "/" + name
 	}
-	return normalizeKind(w)
+	parts := strings.Split(w, ",")
+	for i, p := range parts {
+		parts[i] = normalizeKind(p)
+	}
+	return strings.Join(parts, ",")
 }
 
 // argTokens indexes args for rule matching. Values of value-taking flags are
@@ -250,18 +263,7 @@ func normalizeWord(w string) string {
 func argTokens(verb string, args []string) tokenSet {
 	t := tokenSet{flags: map[string]bool{}, assoc: map[string]bool{}, words: map[string]bool{}}
 	var positionals []string
-	addWord := func(a string) {
-		positionals = append(positionals, a)
-		for _, part := range strings.Split(a, ",") {
-			t.words[part] = true
-			t.words[normalizeWord(part)] = true
-			if kind, name, ok := strings.Cut(part, "/"); ok {
-				t.words[kind] = true
-				t.words[normalizeKind(kind)] = true
-				t.words[name] = true
-			}
-		}
-	}
+	addWord := func(a string) { positionals = append(positionals, a) }
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--" {
 			for _, w := range args[i+1:] {
@@ -288,10 +290,28 @@ func argTokens(verb string, args []string) tokenSet {
 			i++
 		}
 	}
-	// Drop the verb and a rollout-style subcommand so `rollout restart deploy
-	// web` and `patch deploy web` synthesize deployment/web.
+	// Every positional is a comparable word verbatim. Only resource-TYPE
+	// positions (the first positional past the verb and a rollout-style
+	// subcommand, and the kind of any TYPE/NAME) are also indexed in
+	// normalized form; names are never normalized.
+	for _, a := range positionals {
+		t.words[a] = true
+	}
 	for len(positionals) > 0 && (positionals[0] == verb || rolloutSubs[positionals[0]]) {
 		positionals = positionals[1:]
+	}
+	for i, a := range positionals {
+		if kind, name, ok := strings.Cut(a, "/"); ok {
+			t.words[kind] = true
+			t.words[name] = true
+			t.words[normalizeKind(kind)] = true
+			t.words[normalizeKind(kind)+"/"+name] = true
+		} else if i == 0 {
+			for _, part := range strings.Split(a, ",") {
+				t.words[part] = true
+				t.words[normalizeKind(part)] = true
+			}
+		}
 	}
 	if len(positionals) >= 2 && !strings.Contains(positionals[0], "/") {
 		for _, kind := range strings.Split(positionals[0], ",") {
@@ -352,22 +372,26 @@ var kindSet = func() map[string]bool {
 	return m
 }()
 
-// normalizeKind maps a word that IS a known kind to its canonical singular
-// name: case-insensitive, aliases and plurals resolved, and an API-group
-// suffix dropped (deployments.apps -> deployment). Anything else is returned
-// untouched: a resource NAME such as `web.prod` must never be truncated at
-// its dot or lowercased into a different name.
+// normalizeKind maps a resource TYPE to a canonical comparable form:
+// lowercased, any .group[/version] suffix dropped, known aliases/plurals
+// resolved, and unknown kinds (CRDs, leases, endpointslices) naively
+// singularized. Only call it on TYPE positions, never on names.
 func normalizeKind(k string) string {
 	l := strings.ToLower(k)
-	if !kindSet[l] {
-		base, _, ok := strings.Cut(l, ".")
-		if !ok || !kindSet[base] {
-			return k
-		}
+	if base, _, ok := strings.Cut(l, "."); ok && base != "" {
 		l = base
 	}
 	if v, ok := kindAliases[l]; ok {
 		return v
+	}
+	if kindSet[l] || l == "" {
+		return l
+	}
+	switch {
+	case strings.HasSuffix(l, "ies"):
+		return l[:len(l)-3] + "y"
+	case strings.HasSuffix(l, "s") && !strings.HasSuffix(l, "ss"):
+		return l[:len(l)-1]
 	}
 	return l
 }
