@@ -154,7 +154,7 @@ func Run(ctx context.Context, p *Plan, opt Options, progress func(string)) error
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpdir)
+	defer func() { _ = os.RemoveAll(tmpdir) }()
 
 	progress("downloading " + p.AssetName)
 	tarPath := filepath.Join(tmpdir, p.AssetName)
@@ -168,7 +168,7 @@ func Run(ctx context.Context, p *Plan, opt Options, progress func(string)) error
 		// unverified binary over the running one is not something to do
 		// silently. --skip-checksum is the explicit escape hatch (e.g. for
 		// snapshot builds). Mismatches and fetch errors are never skippable.
-		if !(opt.SkipChecksum && errors.Is(err, errNoChecksumPublished)) {
+		if !opt.SkipChecksum || !errors.Is(err, errNoChecksumPublished) {
 			if errors.Is(err, errNoChecksumPublished) {
 				return fmt.Errorf("checksum verification: %w for %s (re-run with --skip-checksum to install unverified; UNSAFE)", err, p.AssetName)
 			}

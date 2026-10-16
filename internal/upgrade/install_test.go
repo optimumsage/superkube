@@ -159,7 +159,7 @@ func writeFakeTarball(t *testing.T, path, name string, body []byte) {
 	if err != nil {
 		t.Fatalf("create tarball: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	gz := gzip.NewWriter(f)
 	tw := tar.NewWriter(gz)
 	hdr := &tar.Header{

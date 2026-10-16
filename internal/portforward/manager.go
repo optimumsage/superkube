@@ -57,7 +57,7 @@ func Start(opts StartOpts) (Entry, error) {
 	}
 	// We pass logFile to the child and close our handle after Start; the OS
 	// keeps the fd alive in the child.
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	args := buildKubectlArgs(opts)
 	cmd := exec.Command(kubectlPath, args...)

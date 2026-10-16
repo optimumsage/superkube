@@ -177,7 +177,7 @@ func TestRun_NoChecksum_Aborts(t *testing.T) {
 	}
 	f := &routingDoer{routes: map[string]routedResponse{
 		"https://github.com/foo/bar/releases/download/v0.3.0/superkube_0.3.0_linux_amd64.tar.gz": {
-			status: 200, body: buildTarball(t, "superkube", []byte("new")),
+			status: 200, body: buildTarball(t, []byte("new")),
 		},
 		"https://github.com/foo/bar/releases/download/v0.3.0/checksums.txt": {status: 404},
 	}}
@@ -207,7 +207,7 @@ func TestRun_MissingChecksumEntry_Aborts(t *testing.T) {
 	}
 	f := &routingDoer{routes: map[string]routedResponse{
 		"https://github.com/foo/bar/releases/download/v0.3.0/superkube_0.3.0_linux_amd64.tar.gz": {
-			status: 200, body: buildTarball(t, "superkube", []byte("new")),
+			status: 200, body: buildTarball(t, []byte("new")),
 		},
 		"https://github.com/foo/bar/releases/download/v0.3.0/checksums.txt": {
 			status: 200, body: []byte(strings.Repeat("a", 64) + "  some_other_asset.tar.gz\n"),
@@ -239,7 +239,7 @@ func TestRun_EndToEnd_SkipChecksum(t *testing.T) {
 	}
 
 	wantContent := []byte("new binary v0.3.0")
-	tarBytes := buildTarball(t, "superkube", wantContent)
+	tarBytes := buildTarball(t, wantContent)
 
 	f := &routingDoer{routes: map[string]routedResponse{
 		"https://github.com/foo/bar/releases/download/v0.3.0/superkube_0.3.0_linux_amd64.tar.gz": {
@@ -288,7 +288,7 @@ func TestRun_EndToEnd_WithChecksumMatch(t *testing.T) {
 		t.Fatalf("write target: %v", err)
 	}
 
-	tarBytes := buildTarball(t, "superkube", []byte("v0.3.0 contents"))
+	tarBytes := buildTarball(t, []byte("v0.3.0 contents"))
 	sum := sha256.Sum256(tarBytes)
 	checksumsBody := hex.EncodeToString(sum[:]) + "  superkube_0.3.0_linux_amd64.tar.gz\n"
 
@@ -320,7 +320,7 @@ func TestRun_ChecksumMismatchAborts(t *testing.T) {
 		t.Fatalf("write target: %v", err)
 	}
 
-	tarBytes := buildTarball(t, "superkube", []byte("contents"))
+	tarBytes := buildTarball(t, []byte("contents"))
 	checksumsBody := strings.Repeat("0", 64) + "  superkube_0.3.0_linux_amd64.tar.gz\n"
 
 	f := &routingDoer{routes: map[string]routedResponse{
@@ -422,11 +422,11 @@ type byteCloser struct{ r *bytes.Reader }
 func (b *byteCloser) Read(p []byte) (int, error) { return b.r.Read(p) }
 func (b *byteCloser) Close() error               { return nil }
 
-func buildTarball(t *testing.T, name string, body []byte) []byte {
+func buildTarball(t *testing.T, body []byte) []byte {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ar.tar.gz")
-	writeFakeTarball(t, path, name, body)
+	writeFakeTarball(t, path, "superkube", body)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read tarball: %v", err)
