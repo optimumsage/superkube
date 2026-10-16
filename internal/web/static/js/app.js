@@ -573,7 +573,10 @@
             setTimeout(() => this.reload(), 200);
           } else {
             this.status = 'apply failed';
-            this.statusDetail = d.error || '';
+            this.statusDetail = d.error || d.forbid_reason || ('HTTP ' + r.status);
+            // The token is single-use and burned once consumed (410 expired,
+            // 502 apply error): force a fresh preview.
+            if (r.status !== 400 && r.status !== 403) { this.confirmToken = ''; this.confirmExpect = ''; }
           }
         } catch (e) {
           this.status = 'apply failed';
@@ -700,10 +703,14 @@
       init() {},
       async preview() {
         if (!this.yaml.trim()) { this.status = 'paste a manifest first'; return; }
-        this.busy = true; this.status = 'computing diff…'; this.diff = ''; this.applyOut = '';
+        this.busy = true; this.status = 'computing diff…'; this.diff = ''; this.applyOut = ''; this.confirmToken = ''; this.confirmExpect = '';
         try {
           const r = await fetch('/api/v1/apply/preview', { method: 'POST', headers: csrfHeaders(), body: JSON.stringify({ yaml: this.yaml }) });
           const d = await r.json();
+          if (!r.ok) {
+            this.status = 'preview failed: ' + (d.error || d.forbid_reason || ('HTTP ' + r.status));
+            return;
+          }
           if (d.status === 'no_changes') { this.status = 'no differences (cluster matches manifest)'; return; }
           this.diff = d.diff_html || '';
           this.confirmToken = d.confirm_token || '';
@@ -723,7 +730,14 @@
           const r = await fetch('/api/v1/apply/commit', { method: 'POST', headers: csrfHeaders(), body: JSON.stringify({ yaml: this.yaml, confirm_token: this.confirmToken, confirm_value: typed }) });
           const d = await r.json();
           this.applyOut = d.output || '';
-          this.status = d.status === 'applied' ? 'applied' : 'apply failed';
+          if (r.ok && d.status === 'applied') {
+            this.status = 'applied';
+            this.confirmToken = ''; this.confirmExpect = '';
+          } else {
+            this.status = 'apply failed: ' + (d.error || d.forbid_reason || ('HTTP ' + r.status));
+            // Single-use token is burned after a consumed attempt (410/502).
+            if (r.status !== 400 && r.status !== 403) { this.confirmToken = ''; this.confirmExpect = ''; }
+          }
         } catch (e) { this.status = 'apply failed: ' + e; }
         finally { this.busy = false; }
       },
