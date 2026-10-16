@@ -74,9 +74,8 @@ func runResourceEdit(cmd *cobra.Command, args []string, kind string) error {
 	if len(args) == 0 || firstPositional(args) == "" {
 		return fmt.Errorf("%s edit: NAME is required", kind)
 	}
-	if rule, blocked := Policy().IsForbidden("edit", append([]string{kind}, args...)); blocked {
-		return fmt.Errorf("edit refused by policy %q for context matching %q",
-			rule, Policy().MatchedPattern)
+	if err := guardOp("edit", append([]string{kind}, args...)); err != nil {
+		return err
 	}
 	runner, err := kubectl.Default()
 	if err != nil {

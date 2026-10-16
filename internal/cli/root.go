@@ -50,6 +50,14 @@ func Execute(args []string) int {
 	root := NewRootCmd()
 	start := time.Now()
 
+	// Guarded commands set DisableFlagParsing (so unknown kubectl flags reach
+	// kubectl), which means cobra never fills Flags.Context/Namespace/
+	// Kubeconfig for them. Pre-parse those from raw argv — before routing —
+	// so policy resolution, the banner and the audit row all see the context
+	// the command will really run against. argv itself is left untouched.
+	applyScannedFlags(scanGlobalFlags(args))
+	loadPolicy()
+
 	// If the first positional token is an unknown verb, route to passthrough so
 	// krew plugins and future kubectl verbs keep working. We do this before
 	// handing argv to cobra to avoid "unknown command" errors. Passthrough
@@ -63,13 +71,19 @@ func Execute(args []string) int {
 	// for raw kubectl semantics). Krew plugin names and unknown tokens stay on
 	// the passthrough path below.
 	if hasVerb && !isKnownCommand(root, verb) && looksLikeResource(verb) &&
-		!(verbIdx > 0 && args[verbIdx-1] == "--") {
+		(verbIdx == 0 || args[verbIdx-1] != "--") {
 		args = insertVerbAt(args, verbIdx, "get")
 		verb = "get"
 	}
 
 	if hasVerb && !isKnownCommand(root, verb) {
-		code := runPassthrough(rootContext(), args)
+		var code int
+		if err := guardPassthrough(verb, args); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			code = 1
+		} else {
+			code = runPassthrough(rootContext(), args)
+		}
 		recordAudit(verb, args, code, time.Since(start))
 		return code
 	}
@@ -89,7 +103,7 @@ func Execute(args []string) int {
 // recordAudit captures one invocation in the audit log. Best-effort; failures
 // are silenced so logging never breaks a user command.
 func recordAudit(verb string, argv []string, exitCode int, dur time.Duration) {
-	if Flags.Audit == "off" {
+	if !auditEnabled() {
 		return
 	}
 	user := ""
@@ -166,13 +180,12 @@ func NewRootCmd() *cobra.Command {
 	f.StringVar(&Flags.DryRun, "dry-run", "auto", "dry-run mode: auto|server|client|none")
 	f.BoolVar(&Flags.Plain, "plain", false, "disable color/TUI output")
 	f.BoolVarP(&Flags.Verbose, "verbose", "v", false, "verbose output")
-	f.StringVar(&Flags.Audit, "audit", "on", "audit logging: on|off")
+	f.StringVar(&Flags.Audit, "audit", "", "audit logging: on|off (default: on, or audit.enabled from config)")
 	f.BoolVar(&Flags.NoContext, "no-context", false, "for AI: send only the literal prompt, no cluster data")
 	f.BoolVar(&Flags.Tools, "tools", false, "for AI: let the provider run read-only kubectl to investigate (claude-enforced; antigravity best-effort)")
 	f.DurationVar(&Flags.AITimeout, "ai-timeout", 0, "for AI: max time to wait for a response (default 90s, 5m with --tools)")
 
 	root.PersistentPreRunE = persistentPreRunE
-	root.PersistentPostRunE = persistentPostRunE
 
 	// Subcommands. Each command file registers itself here.
 	root.AddCommand(newVersionCmd())
@@ -225,12 +238,15 @@ func rootContext() context.Context {
 // persistentPreRunE runs before every subcommand. Configures shared state
 // (UI styling, policy from config) and prints a context banner when the
 // active context matches a policy-flagged pattern.
-func persistentPreRunE(cmd *cobra.Command, args []string) error {
+func persistentPreRunE(_ *cobra.Command, _ []string) error {
 	ui.Init(Flags.Plain)
-	loadPolicy()
+	// Execute normally loaded the policy already (before routing, so
+	// passthrough is covered too); only load here when a caller built the
+	// command tree directly, e.g. tests.
+	if !policyLoaded {
+		loadPolicy()
+	}
 	showContextBanner()
-	_ = cmd
-	_ = args
 	return nil
 }
 
@@ -244,19 +260,65 @@ var activePolicy guardrail.Policy
 // getter so command files can keep their imports short.
 func Policy() guardrail.Policy { return activePolicy }
 
+var (
+	// policyLoaded records that loadPolicy ran for this invocation.
+	policyLoaded bool
+	// configErr is non-nil when config.yaml exists but is invalid. A broken
+	// guardrail config must fail CLOSED: guarded commands refuse (see
+	// requireValidConfig) instead of silently running with no policy.
+	configErr error
+	// activeCfg is the successfully loaded config (nil when absent/invalid).
+	activeCfg *config.Config
+)
+
 func loadPolicy() {
+	policyLoaded = true
+	activePolicy = guardrail.Policy{}
+	activeCfg = nil
+	configErr = nil
+
 	cfg, err := config.Load()
 	if err != nil {
-		// Best-effort: if config is malformed, behave as if no policy was set.
-		// We surface this only at -v in a future iteration.
+		configErr = err
+		fmt.Fprintf(os.Stderr, "superkube: config %s is invalid: %v\n", config.ConfigFile(), err)
 		return
 	}
+	activeCfg = cfg
+	applyConfigDefaults(cfg)
+
 	current := Flags.Context
 	if current == "" {
 		loader := kube.Loader{KubeconfigPath: Flags.Kubeconfig}
 		current, _ = loader.CurrentContext()
 	}
 	activePolicy = guardrail.EffectivePolicy(cfg, current)
+}
+
+// applyConfigDefaults feeds config.yaml's ai.* settings in as defaults. An
+// explicit --ai / --ai-timeout (parsed by cobra after this runs and so
+// overriding it) and $SUPERKUBE_AI always win over the config file.
+func applyConfigDefaults(cfg *config.Config) {
+	if Flags.AIProvider == "" && strings.TrimSpace(os.Getenv("SUPERKUBE_AI")) == "" {
+		Flags.AIProvider = cfg.AI.Provider
+	}
+	if Flags.AITimeout == 0 {
+		Flags.AITimeout = cfg.AITimeout()
+	}
+}
+
+// auditEnabled reports whether this invocation should be recorded.
+// Precedence: --audit on|off, then audit.enabled in config, then on.
+func auditEnabled() bool {
+	switch strings.ToLower(Flags.Audit) {
+	case "off":
+		return false
+	case "on":
+		return true
+	}
+	if activeCfg != nil && activeCfg.Audit.Enabled != nil {
+		return *activeCfg.Audit.Enabled
+	}
+	return true
 }
 
 // activeBannerText caches whatever banner showContextBanner decided to print,
@@ -334,43 +396,24 @@ func ActiveBanner() (text, style string) {
 	return activeBannerText, activeBannerKind
 }
 
-// persistentPostRunE runs after a subcommand completes (success or error). It
-// will eventually write the audit log entry. Stub for now.
-func persistentPostRunE(cmd *cobra.Command, args []string) error {
-	_ = cmd
-	_ = args
-	return nil
-}
-
 // errSilentFail signals that the error has already been reported and Execute
 // should just propagate the exit code without printing again.
 var errSilentFail = errors.New("silent failure")
 
-// exitCodeFromErr maps an error to a process exit code. Commands that shell
-// out to kubectl wrap the upstream exit code in *kubectl.ExitCodeError; others
-// fall through to 1.
-func exitCodeFromErr(err error) int {
-	if err == nil {
-		return 0
-	}
-	var ec *kubectl.ExitCodeError
-	if errors.As(err, &ec) {
-		return ec.Code
-	}
-	return 1
-}
-
 // firstVerb scans args left-to-right, skipping leading root flags, and returns
 // the first positional token as the verb. We use it only for routing decisions
-// (cobra vs passthrough). Passthrough always receives the full argv unchanged
-// so kubectl-global flags survive.
+// (cobra vs passthrough) and the audit verb. Passthrough always receives the
+// full argv unchanged so kubectl-global flags survive.
 //
-// We classify only superkube's own root flags. Unknown flags are treated as
-// boolean (consume one token) — this way kubectl-only flags don't accidentally
-// "eat" the verb. The cost of being wrong: an unknown verb that follows an
-// unknown value-taking flag may get treated as the verb. In practice this is
-// fine because passthrough hands the full argv to kubectl, which will produce
-// the same error the user would have seen from kubectl directly.
+// Value-taking flags (superkube's own plus all of kubectl's global ones, see
+// globalValueFlags) consume their value so it is never mistaken for the verb:
+// `sk --as admin --context prod delete pod x` routes to delete, not "admin".
+// Any other unknown flag is treated as boolean (consume one token) so that
+// kubectl-only boolean flags don't eat the verb.
+//
+// `-v`/`--v` conflict: kubectl's is a verbosity level (`-v 8`, `--v=8`),
+// superkube's `-v` is the boolean --verbose. We take a following numeric token
+// as the value and otherwise treat it as boolean; verbs are never numeric.
 func firstVerb(args []string) (verb string, ok bool) {
 	v, _, found := firstVerbAt(args)
 	return v, found
@@ -390,14 +433,8 @@ func firstVerbAt(args []string) (verb string, idx int, ok bool) {
 			}
 			return "", 0, false
 		}
-		if strings.HasPrefix(a, "-") {
-			name := strings.TrimLeft(a, "-")
-			if eq := strings.IndexByte(name, '='); eq >= 0 {
-				_ = name[:eq]
-				i++
-				continue
-			}
-			if rootFlagTakesValue(name) {
+		if strings.HasPrefix(a, "-") && a != "-" {
+			if flagConsumesNext(args, i, globalValueFlags) {
 				i += 2
 				continue
 			}
@@ -409,14 +446,63 @@ func firstVerbAt(args []string) (verb string, idx int, ok bool) {
 	return "", 0, false
 }
 
-// rootFlagTakesValue reports whether a superkube root flag of the given name
-// (without leading dashes) consumes the next token as its value.
-func rootFlagTakesValue(name string) bool {
-	switch name {
-	case "context", "namespace", "n", "kubeconfig", "ai", "dry-run", "audit":
-		return true
+// scannedFlags are the root/global flags recovered from raw argv.
+type scannedFlags struct {
+	Context    string
+	Kubeconfig string
+	Namespace  string
+	Audit      string
+}
+
+// scanGlobalFlags extracts --context, --kubeconfig, -n/--namespace and --audit
+// from raw argv, in `--x=v` and `--x v` forms, anywhere (before or after the
+// verb), last occurrence wins. Scanning stops at a bare `--` (what follows is
+// a command for exec/debug, not our flags). Values of other value-taking
+// flags are skipped so `--as -n` can't be misread. The argv is not modified.
+func scanGlobalFlags(args []string) scannedFlags {
+	var sf scannedFlags
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			continue
+		}
+		name, val, hasEq := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if !hasEq && flagConsumesNext(args, i, globalValueFlags) {
+			val = args[i+1]
+			i++
+		}
+		switch name {
+		case "context":
+			sf.Context = val
+		case "kubeconfig":
+			sf.Kubeconfig = val
+		case "namespace", "n":
+			sf.Namespace = val
+		case "audit":
+			sf.Audit = val
+		}
 	}
-	return false
+	return sf
+}
+
+// applyScannedFlags copies scanned values into Flags without clobbering
+// anything with an empty string.
+func applyScannedFlags(sf scannedFlags) {
+	if sf.Context != "" {
+		Flags.Context = sf.Context
+	}
+	if sf.Kubeconfig != "" {
+		Flags.Kubeconfig = sf.Kubeconfig
+	}
+	if sf.Namespace != "" {
+		Flags.Namespace = sf.Namespace
+	}
+	if sf.Audit != "" {
+		Flags.Audit = sf.Audit
+	}
 }
 
 // isKnownCommand reports whether name is a direct subcommand of root. The

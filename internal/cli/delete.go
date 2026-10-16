@@ -38,13 +38,19 @@ func runDelete(cmd *cobra.Command, args []string) error {
 
 	// Policy check: forbidden operations are blocked outright, regardless of
 	// --yes. Bypassing requires editing config.yaml.
-	if rule, blocked := Policy().IsForbidden("delete", args); blocked {
-		return fmt.Errorf("delete refused by policy %q for context matching %q",
-			rule, Policy().MatchedPattern)
+	if err := guardOp("delete", args); err != nil {
+		return err
 	}
 
 	// Decide confirmation style based on what's being deleted.
 	ReshowBanner()
+	positionals := positionalArgs(kubectlArgs)
+	// Selector/manifest-driven deletes name no resource we could ask the user
+	// to type, e.g. `delete -f x.yaml` or `delete pods -l app=x`.
+	fromSource := hasFlag(kubectlArgs, "-f") || hasFlag(kubectlArgs, "--filename") ||
+		hasFlag(kubectlArgs, "-k") || hasFlag(kubectlArgs, "--kustomize") ||
+		hasFlag(kubectlArgs, "-l") || hasFlag(kubectlArgs, "--selector") ||
+		hasFlag(kubectlArgs, "--field-selector")
 	switch {
 	case all:
 		// `delete --all` is the highest-risk variant. Refuse without both --yes
@@ -59,18 +65,24 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		); err != nil {
 			return err
 		}
+	case fromSource && len(positionals) < 2:
+		if err := guardrail.TypedPhrase(
+			fmt.Sprintf("about to: kubectl delete %s", strings.Join(kubectlArgs, " ")),
+			"DELETE",
+			yes,
+		); err != nil {
+			return err
+		}
 	default:
-		positionals := positionalArgs(args)
-		// positionals look like: [TYPE NAME [NAME...]]
-		if len(positionals) < 2 {
+		// positionals look like: [TYPE NAME [NAME...]] or [TYPE/NAME ...].
+		resourceType, names := splitDeleteTargets(positionals)
+		if len(names) == 0 {
 			return errors.New("delete: need TYPE and at least one NAME (or --all)")
 		}
-		resourceType := positionals[0]
-		names := positionals[1:]
 		switch len(names) {
 		case 1:
 			if err := guardrail.TypedName(
-				fmt.Sprintf("delete %s %s", resourceType, names[0]),
+				strings.TrimSpace(fmt.Sprintf("delete %s %s", resourceType, names[0])),
 				names[0],
 				yes,
 			); err != nil {
@@ -79,7 +91,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		default:
 			phrase := fmt.Sprintf("DELETE-%d", len(names))
 			if err := guardrail.TypedPhrase(
-				fmt.Sprintf("delete %d %s: %s", len(names), resourceType, strings.Join(names, ", ")),
+				strings.TrimSpace(fmt.Sprintf("delete %d %s: %s", len(names), resourceType, strings.Join(names, ", "))),
 				phrase,
 				yes,
 			); err != nil {
@@ -89,17 +101,38 @@ func runDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run the real delete.
-	runner, err := kubectl.Default()
+	runner, err := kubectl.New()
 	if err != nil {
 		return err
 	}
 	return runner.Run(cmd.Context(), append([]string{"delete"}, kubectlArgs...), kubectl.RunOpts{})
 }
 
+// splitDeleteTargets turns delete's positionals into (type, names). Supports
+// `TYPE NAME...` and the all-`TYPE/NAME` form (type is then empty and each
+// name keeps its kind prefix, which is what the user types to confirm).
+func splitDeleteTargets(positionals []string) (resourceType string, names []string) {
+	if len(positionals) == 0 {
+		return "", nil
+	}
+	allSlashed := true
+	for _, p := range positionals {
+		if !strings.Contains(p, "/") {
+			allSlashed = false
+			break
+		}
+	}
+	if allSlashed {
+		return "", positionals
+	}
+	return positionals[0], positionals[1:]
+}
+
 const deleteLongHelp = `Delete resources with typed-name confirmation.
 
 Single resource: you must type the resource name verbatim.
 Multiple names:  you must type the phrase "DELETE-N" where N is the count.
+-f / -k / -l:    deleting from a manifest or selector: type the phrase "DELETE".
 --all:           refuses without --yes AND a typed "DELETE" phrase.
 
 Flags after the verb are passed to kubectl verbatim, so the usual kubectl
