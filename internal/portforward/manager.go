@@ -117,7 +117,11 @@ func Stop(id string) ([]Entry, error) {
 		return removed, err
 	}
 	for _, e := range removed {
-		_ = Kill(e.PID)
+		// Re-verify identity right before signalling: the entry may be stale
+		// and its PID reused by an unrelated process.
+		if ownsProcess(e) {
+			_ = Kill(e.PID)
+		}
 	}
 	return removed, nil
 }

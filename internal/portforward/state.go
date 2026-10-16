@@ -7,7 +7,9 @@
 // out to `kubectl port-forward` and detaches it. The PID lives in the state
 // file; liveness is probed lazily with kill(pid, 0). If the process dies
 // out-of-band the entry stays until the next `sk pf list`, which prunes
-// dead PIDs.
+// dead PIDs. A live PID is only trusted if its command line still looks like
+// one of our `kubectl port-forward` children (PIDs get reused, e.g. after a
+// reboot), so we never signal an unrelated process.
 package portforward
 
 import (
@@ -15,8 +17,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -47,18 +52,49 @@ func LogDir() string {
 	return filepath.Join(config.StateDir(), "portforward")
 }
 
+// stateDir is the directory holding the manifest and its lock file.
+func stateDir() string { return filepath.Dir(StateFile()) }
+
+// lockPath is the flock file guarding the state read-modify-write.
+func lockPath() string { return StateFile() + ".lock" }
+
 var mu sync.Mutex
+
+// withLock runs fn holding both the in-process mutex and an exclusive flock on
+// the lock file. The mutex covers goroutines in this process; the flock covers
+// other `sk` processes (two concurrent `sk pf start` would otherwise each read
+// the old manifest and the later write would drop the other's entry).
+func withLock(fn func() error) error {
+	mu.Lock()
+	defer mu.Unlock()
+	if err := os.MkdirAll(stateDir(), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("flock %s: %w", lockPath(), err)
+	}
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	return fn()
+}
 
 // Load reads the state file, dropping any entries whose PID is no longer
 // alive. The returned slice is sorted by StartedAt asc so the CLI's table
 // is stable across runs.
-func Load() ([]Entry, error) {
-	mu.Lock()
-	defer mu.Unlock()
-	return loadLocked()
+func Load() (entries []Entry, err error) {
+	err = withLock(func() error {
+		entries, err = loadLocked()
+		return err
+	})
+	return entries, err
 }
 
-// loadLocked is the inner unlocked variant for callers that already hold mu.
+// loadLocked is the inner unlocked variant for callers that already hold the
+// state lock (withLock).
 func loadLocked() ([]Entry, error) {
 	data, err := os.ReadFile(StateFile())
 	if err != nil {
@@ -75,7 +111,7 @@ func loadLocked() ([]Entry, error) {
 	}
 	alive := entries[:0]
 	for _, e := range entries {
-		if isAlive(e.PID) {
+		if ownsProcess(e) {
 			alive = append(alive, e)
 		}
 	}
@@ -90,43 +126,40 @@ func loadLocked() ([]Entry, error) {
 // Add appends e to the state file. Caller must have already spawned the
 // process and recorded its PID.
 func Add(e Entry) error {
-	mu.Lock()
-	defer mu.Unlock()
-	current, err := loadLocked()
-	if err != nil {
-		return err
-	}
-	current = append(current, e)
-	return writeLocked(current)
+	return withLock(func() error {
+		current, err := loadLocked()
+		if err != nil {
+			return err
+		}
+		current = append(current, e)
+		return writeLocked(current)
+	})
 }
 
 // Remove drops the entry with the given id (or all entries if id == "all").
 // Returns the entries it removed so the caller can act on them (send SIGTERM,
 // delete log files, etc.). Missing id is not an error — Remove("nope") is a
 // no-op.
-func Remove(id string) ([]Entry, error) {
-	mu.Lock()
-	defer mu.Unlock()
-	current, err := loadLocked()
-	if err != nil {
-		return nil, err
-	}
-	var removed []Entry
-	kept := current[:0]
-	for _, e := range current {
-		if id == "all" || e.ID == id {
-			removed = append(removed, e)
-			continue
+func Remove(id string) (removed []Entry, err error) {
+	err = withLock(func() error {
+		current, err := loadLocked()
+		if err != nil {
+			return err
 		}
-		kept = append(kept, e)
-	}
-	if len(removed) == 0 {
-		return nil, nil
-	}
-	if err := writeLocked(kept); err != nil {
-		return removed, err
-	}
-	return removed, nil
+		kept := current[:0]
+		for _, e := range current {
+			if id == "all" || e.ID == id {
+				removed = append(removed, e)
+				continue
+			}
+			kept = append(kept, e)
+		}
+		if len(removed) == 0 {
+			return nil
+		}
+		return writeLocked(kept)
+	})
+	return removed, err
 }
 
 // FindByID returns the matching entry from a freshly loaded state, or
@@ -144,7 +177,7 @@ func FindByID(id string) (Entry, bool, error) {
 	return Entry{}, false, nil
 }
 
-// writeLocked persists entries to the state file. Caller must hold mu.
+// writeLocked persists entries to the state file. Caller must hold the state lock.
 func writeLocked(entries []Entry) error {
 	if err := os.MkdirAll(filepath.Dir(StateFile()), 0o700); err != nil {
 		return err
@@ -188,4 +221,30 @@ func isAlive(pid int) bool {
 // human time scales without pulling in a UUID library.
 func NewID() string {
 	return fmt.Sprintf("pf-%x", time.Now().UnixNano()&0xFFFFFF)
+}
+
+// processCommand returns the command line of pid. It is a variable so tests
+// can substitute it. `ps -o command=` is available on both macOS and Linux.
+var processCommand = func(pid int) (string, error) {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ownsProcess reports whether e.PID is alive AND still looks like the
+// `kubectl port-forward` we spawned. A reused PID (reboot, long-lived state
+// file) fails the command-line check, so the entry is treated as stale and the
+// process is never signalled. If the command line can't be read we say no:
+// dropping an entry is recoverable, killing a stranger is not.
+func ownsProcess(e Entry) bool {
+	if !isAlive(e.PID) {
+		return false
+	}
+	cmd, err := processCommand(e.PID)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(cmd, "port-forward")
 }
