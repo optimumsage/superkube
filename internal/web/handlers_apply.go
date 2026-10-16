@@ -2,12 +2,12 @@ package web
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/optimumsage/superkube/internal/guardrail"
 	"github.com/optimumsage/superkube/internal/kubectl"
 )
 
@@ -54,6 +54,47 @@ func (s *Server) applyForbidden(w http.ResponseWriter, sess session, yamlText st
 	return false
 }
 
+// manifestSession returns the session whose -n is safe to hand to kubectl for
+// yamlText. Real kubectl refuses a manifest whose metadata.namespace differs
+// from -n, so -n is dropped when every document names its own namespace; for
+// namespace-less documents it stays the resolved namespace (sess keeps it for
+// policy and digests either way).
+func manifestSession(sess session, yamlText string) session {
+	docs, err := parseManifestDocs(yamlText)
+	if err != nil || len(docs) == 0 {
+		return sess
+	}
+	for _, d := range docs {
+		if d.Namespace == "" {
+			return sess
+		}
+	}
+	sess.Namespace = ""
+	return sess
+}
+
+// kubectlDiff runs `kubectl diff` and distinguishes "has changes" (exit 1 with
+// diff output) from a failure (exit >1, or exit 1 with nothing on stdout and
+// an error on stderr, e.g. a namespace mismatch). Only the diff goes to out.
+func (s *Server) kubectlDiff(r *http.Request, args []string, out *bytes.Buffer) (bool, error) {
+	var stdout, stderr bytes.Buffer
+	err := s.deps.Runner.Run(r.Context(), append([]string{"diff"}, args...), kubectl.RunOpts{Stdout: &stdout, Stderr: &stderr})
+	if err == nil {
+		out.Write(stdout.Bytes())
+		return false, nil
+	}
+	var ee *kubectl.ExitCodeError
+	if asErrAs(err, &ee) && ee.Code == 1 && (strings.TrimSpace(stdout.String()) != "" || strings.TrimSpace(stderr.String()) == "") {
+		out.Write(stdout.Bytes())
+		return true, nil
+	}
+	msg := strings.TrimSpace(stderr.String())
+	if msg == "" {
+		msg = err.Error()
+	}
+	return false, errors.New("kubectl diff failed: " + msg)
+}
+
 // previewYAML runs `kubectl diff` for yamlText and, when there are changes,
 // issues a confirmation token bound to (verb, context, digest) that also
 // carries the previewed YAML as its Payload. The commit executes that stored
@@ -71,16 +112,16 @@ func (s *Server) previewYAML(w http.ResponseWriter, r *http.Request, sess sessio
 	}
 	defer cleanup()
 
-	args := sess.prependGlobalFlags([]string{"-f", tmp})
+	args := manifestSession(sess, yamlText).prependGlobalFlags([]string{"-f", tmp})
 
 	var buf bytes.Buffer
-	result, err := guardrail.PreviewApply(r.Context(), s.deps.Runner, args, &buf)
-	if err != nil {
-		s.render.Error(w, http.StatusBadGateway, err.Error())
+	hasChanges, derr := s.kubectlDiff(r, args, &buf)
+	if derr != nil {
+		s.render.Error(w, http.StatusBadGateway, derr.Error())
 		return
 	}
 
-	if !result.HasChanges {
+	if !hasChanges {
 		s.render.JSON(w, http.StatusOK, map[string]any{
 			"status": "no_changes",
 			"diff":   buf.String(),
@@ -124,7 +165,7 @@ func (s *Server) applyYAML(r *http.Request, sess session, payload string) (out s
 	}
 	defer cleanup()
 
-	args := sess.prependGlobalFlags([]string{"apply", "-f", tmp})
+	args := manifestSession(sess, payload).prependGlobalFlags([]string{"apply", "-f", tmp})
 	var buf bytes.Buffer
 	runErr := s.deps.Runner.Run(r.Context(), args, kubectl.RunOpts{Stdout: &buf, Stderr: &buf})
 	if runErr != nil {

@@ -77,7 +77,7 @@ func TestEditCommit_RejectsBadToken(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/resources/configmaps/default/foo/edit/commit",
-		strings.NewReader(`{"yaml":"x","confirm_token":"nope"}`))
+		strings.NewReader(`{"yaml":`+quote(cmYAML)+`,"confirm_token":"nope"}`))
 	req.Host = "127.0.0.1"
 	req.SetPathValue("kind", "configmaps")
 	req.SetPathValue("ns", "default")
@@ -137,7 +137,7 @@ func TestEditPreview_RejectsEmptyYAML(t *testing.T) {
 }
 
 func TestEditRejectsCommentedAndCRLFSeparators(t *testing.T) {
-	ok := func(y string) error { return validateEditYAML("cm", "default", "app", "default", y) }
+	ok := func(y string) error { return validateEditYAML("cm", "default", "app", y) }
 	if err := ok(cmYAML); err != nil {
 		t.Fatalf("baseline: %v", err)
 	}

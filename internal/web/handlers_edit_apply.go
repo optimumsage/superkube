@@ -36,13 +36,6 @@ func parseManifestDocs(yamlText string) ([]manifestDoc, error) {
 	dec := utilyaml.NewYAMLOrJSONDecoder(strings.NewReader(yamlText), 4096)
 	var docs []manifestDoc
 	for {
-		var obj struct {
-			Kind     string `json:"kind"`
-			Metadata struct {
-				Name      string `json:"name"`
-				Namespace string `json:"namespace"`
-			} `json:"metadata"`
-		}
 		var raw map[string]any
 		if err := dec.Decode(&raw); err != nil {
 			if errors.Is(err, io.EOF) {
@@ -53,23 +46,54 @@ func parseManifestDocs(yamlText string) ([]manifestDoc, error) {
 		if len(raw) == 0 {
 			continue // empty / comment-only document
 		}
-		b, err := json.Marshal(raw)
-		if err != nil {
-			return nil, fmt.Errorf("invalid YAML: %w", err)
+		if err := collectManifestDocs(raw, 0, &docs); err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal(b, &obj); err != nil {
-			return nil, fmt.Errorf("invalid YAML: %w", err)
-		}
-		docs = append(docs, manifestDoc{Kind: obj.Kind, Name: obj.Metadata.Name, Namespace: obj.Metadata.Namespace})
 	}
+}
+
+const maxListDepth = 8
+
+// collectManifestDocs appends the identity of obj. A `kind: List` / `*List`
+// document is unpacked recursively (kubectl applies its items, not the List),
+// so forbid rules cannot be dodged by wrapping an object in a List.
+func collectManifestDocs(obj map[string]any, depth int, out *[]manifestDoc) error {
+	kind, _ := obj["kind"].(string)
+	if kind == "List" || strings.HasSuffix(kind, "List") {
+		if depth >= maxListDepth {
+			return errors.New("invalid YAML: lists nested too deeply")
+		}
+		items, hasItems := obj["items"]
+		if hasItems && items != nil {
+			list, ok := items.([]any)
+			if !ok {
+				return errors.New("invalid YAML: List items must be a list")
+			}
+			for _, it := range list {
+				m, ok := it.(map[string]any)
+				if !ok {
+					return errors.New("invalid YAML: List item must be an object")
+				}
+				if err := collectManifestDocs(m, depth+1, out); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	md, _ := obj["metadata"].(map[string]any)
+	name, _ := md["name"].(string)
+	ns, _ := md["namespace"].(string)
+	*out = append(*out, manifestDoc{Kind: kind, Name: name, Namespace: ns})
+	return nil
 }
 
 // validateEditYAML ensures an edit submission is exactly one document whose
 // kind, namespace and name are the object named in the URL. Without this the
 // edit endpoint (gated as "edit <kind> <name>") would be an arbitrary apply.
-// An omitted metadata.namespace is accepted only when kubectl would resolve it
-// to nsWant anyway (the session namespace).
-func validateEditYAML(kind, nsWant, name, sessNS, yamlText string) error {
+// An omitted metadata.namespace is accepted: the edit handlers always pass
+// `-n {ns}` from the URL, so kubectl resolves it to nsWant.
+func validateEditYAML(kind, nsWant, name, yamlText string) error {
 	wantKind, ok := canonicalEditKind[kind]
 	if !ok {
 		return fmt.Errorf("edit not supported for kind %s", kind)
@@ -90,7 +114,7 @@ func validateEditYAML(kind, nsWant, name, sessNS, yamlText string) error {
 	}
 	gotNS := obj.Namespace
 	if gotNS == "" {
-		gotNS = sessNS
+		gotNS = nsWant
 	}
 	if gotNS != nsWant {
 		return fmt.Errorf("manifest namespace %q does not match %q", gotNS, nsWant)
@@ -128,11 +152,14 @@ func (s *Server) editYAML(w http.ResponseWriter, kind string, body editBody) (st
 }
 
 // editForbidden runs the forbid gates shared by edit preview and commit. An edit
-// is an apply under the hood, so both `forbid: edit` and `forbid: apply`
-// rules block it.
-func (s *Server) editForbidden(w http.ResponseWriter, sess session, kind, name string) bool {
-	return s.gateForbidden(w, sess, "edit", []string{kind, name}) ||
-		s.gateForbidden(w, sess, "apply", applyArgsForPolicy)
+// is an apply under the hood, so `forbid: edit` rules (matched on the URL kind,
+// canonical Kind, name, kind/name and -n ns) and every `forbid: apply` rule
+// (checked per document, List items included) block it. sess.Namespace must
+// already be the edit's URL namespace.
+func (s *Server) editForbidden(w http.ResponseWriter, sess session, kind, name, yamlText string) bool {
+	canon := canonicalEditKind[kind]
+	args := []string{kind, name, strings.ToLower(canon), canon, strings.ToLower(canon) + "/" + name, "-n", sess.Namespace}
+	return s.gateForbidden(w, sess, "edit", args) || s.applyForbidden(w, sess, yamlText)
 }
 
 // apiResourceEditPreview computes the diff between the submitted YAML and the
@@ -165,12 +192,15 @@ func (s *Server) apiResourceEditPreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	sess := s.readSession(r)
+	// The URL namespace is authoritative for an edit (the object may live in
+	// a namespace other than the one the header is showing).
+	sess.Namespace = ns
 	// Forbid-policy: edit shares the same gate as delete/apply — a context
 	// flagged forbidden cannot be edited from the web UI either.
-	if s.editForbidden(w, sess, kind, name) {
+	if s.editForbidden(w, sess, kind, name, yamlText) {
 		return
 	}
-	if err := validateEditYAML(kind, ns, name, sess.Namespace, yamlText); err != nil {
+	if err := validateEditYAML(kind, ns, name, yamlText); err != nil {
 		s.render.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -201,12 +231,13 @@ func (s *Server) apiResourceEditCommit(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	sess := s.readSession(r)
-	if s.editForbidden(w, sess, kind, name) {
-		return
-	}
 	yamlText, ok := s.editYAML(w, kind, body)
 	if !ok {
+		return
+	}
+	sess := s.readSession(r)
+	sess.Namespace = ns
+	if s.editForbidden(w, sess, kind, name, yamlText) {
 		return
 	}
 	target := kind + "/" + ns + "/" + name
@@ -216,7 +247,7 @@ func (s *Server) apiResourceEditCommit(w http.ResponseWriter, r *http.Request) {
 	}
 	// Defense in depth: the digest already proves this is the text that was
 	// validated at preview time.
-	if err := validateEditYAML(kind, ns, name, sess.Namespace, yamlText); err != nil {
+	if err := validateEditYAML(kind, ns, name, yamlText); err != nil {
 		s.render.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}

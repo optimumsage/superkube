@@ -36,6 +36,7 @@ type hardenOpts struct {
 	startCtx   string
 	noRunner   bool
 	kubeconfig string
+	script     string // replaces the default kubectl body (argv is logged first)
 }
 
 func newHardenEnv(t *testing.T, o hardenOpts) *hardenEnv {
@@ -45,6 +46,9 @@ func newHardenEnv(t *testing.T, o hardenOpts) *hardenEnv {
 	bin := filepath.Join(dir, "kubectl")
 	script := "#!/bin/sh\necho \"$@\" >> " + logPath + "\n" +
 		"if [ \"$1\" = diff ]; then echo '+changed'; exit 1; fi\necho ok\n"
+	if o.script != "" {
+		script = "#!/bin/sh\necho \"$@\" >> " + logPath + "\n" + o.script
+	}
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +268,7 @@ func TestEditCommitChecksTargetAndPolicy(t *testing.T) {
 }
 
 func TestValidateEditYAML(t *testing.T) {
-	ok := func(y string) error { return validateEditYAML("cm", "default", "app", "default", y) }
+	ok := func(y string) error { return validateEditYAML("cm", "default", "app", y) }
 	if err := ok(cmYAML); err != nil {
 		t.Fatalf("valid yaml rejected: %v", err)
 	}
@@ -281,9 +285,6 @@ func TestValidateEditYAML(t *testing.T) {
 		if ok(y) == nil {
 			t.Errorf("%s: accepted", name)
 		}
-	}
-	if validateEditYAML("cm", "default", "app", "other-ns", strings.Replace(cmYAML, "  namespace: default\n", "", 1)) == nil {
-		t.Error("missing namespace must not default when the session ns differs from the URL ns")
 	}
 }
 
