@@ -4,7 +4,7 @@
 #   make build      Build the superkube binary into ./bin/
 #   make install    Install superkube and the `sk` symlink into $GOBIN (or $HOME/go/bin)
 #   make test       Run unit tests
-#   make e2e        Run e2e tests (require a running kind cluster, build tag `e2e`)
+#   make vuln       Run govulncheck
 #   make lint       Run golangci-lint
 #   make fmt        gofmt + goimports
 #   make clean      Remove ./bin
@@ -29,7 +29,7 @@ LDFLAGS    := -s -w \
               -X $(PKG)/internal/version.Commit=$(COMMIT) \
               -X $(PKG)/internal/version.Date=$(DATE)
 
-.PHONY: build install test e2e lint fmt clean tidy run help
+.PHONY: build install test vuln lint fmt clean tidy run help
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?##' Makefile | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -48,8 +48,8 @@ install: build ## Install superkube and create `sk` symlink in $GOBIN
 test: ## Run unit tests
 	go test -race -count=1 ./...
 
-e2e: ## Run e2e tests (requires a reachable kubernetes cluster)
-	go test -race -count=1 -tags=e2e ./test/e2e/...
+vuln: ## Run govulncheck against reachable code
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 lint: ## Run golangci-lint
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed; see https://golangci-lint.run/welcome/install/"; exit 1; }
