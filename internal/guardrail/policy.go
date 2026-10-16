@@ -2,6 +2,7 @@ package guardrail
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -31,9 +32,12 @@ type Policy struct {
 }
 
 // EffectivePolicy resolves the policy for currentContext from the loaded
-// config. Globs are matched left-to-right; ALL matching entries contribute
-// (RequireTypedConfirm is OR'd, Forbid lists are unioned). The banner from
-// the first match wins.
+// config. ALL matching entries contribute (RequireTypedConfirm is OR'd, Forbid
+// lists are unioned). Matches are visited most-specific first (exact name,
+// then the glob with the most literal characters, then alphabetical) so the
+// reported MatchedPattern and the banner (first non-empty wins) are
+// deterministic; Go map iteration order is random and must never leak into
+// what the user sees.
 //
 // The glob syntax supports `*` (any chars, including `/`) and `?` (one char).
 // We deliberately don't use filepath.Match because kubectl context names
@@ -44,10 +48,21 @@ func EffectivePolicy(cfg *config.Config, currentContext string) Policy {
 	if currentContext == "" || len(cfg.Contexts) == 0 {
 		return p
 	}
-	for pattern, section := range cfg.Contexts {
-		if !matchGlob(pattern, currentContext) {
-			continue
+	var matched []string
+	for pattern := range cfg.Contexts {
+		if matchGlob(pattern, currentContext) {
+			matched = append(matched, pattern)
 		}
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		si, sj := specificity(matched[i]), specificity(matched[j])
+		if si != sj {
+			return si > sj
+		}
+		return matched[i] < matched[j]
+	})
+	for _, pattern := range matched {
+		section := cfg.Contexts[pattern]
 		if section.RequireTypedConfirm {
 			p.RequireTypedConfirm = true
 		}
@@ -60,6 +75,16 @@ func EffectivePolicy(cfg *config.Config, currentContext string) Policy {
 		}
 	}
 	return p
+}
+
+// specificity ranks a glob: patterns without wildcards beat any glob; among
+// globs, more literal characters means more specific.
+func specificity(pattern string) int {
+	lit := len(strings.NewReplacer("*", "", "?", "").Replace(pattern))
+	if !strings.ContainsAny(pattern, "*?") {
+		return 1<<20 + lit
+	}
+	return lit
 }
 
 // matchGlob converts a simple glob (with `*` and `?`) to a regex and matches
@@ -105,10 +130,13 @@ func globRE(pattern string) (*regexp.Regexp, error) {
 }
 
 // IsForbidden reports whether an operation described by verb plus args is
-// banned by p. Currently we do simple substring matching: a forbid pattern
-// like "delete --all" matches if the verb starts with "delete" and the args
-// contain "--all". Easy to extend later.
+// banned by p. A rule is a verb followed by tokens that must all appear among
+// the args: "delete --all", "drain", "delete namespace". Resource tokens are
+// normalized on both sides so "delete namespace" also blocks `delete ns foo`,
+// `delete namespaces foo` and `delete namespace/foo`; flags match bare or as
+// --flag=value.
 func (p Policy) IsForbidden(verb string, args []string) (rule string, blocked bool) {
+	have := argTokens(args)
 	for _, rule := range p.Forbidden {
 		tokens := strings.Fields(rule)
 		if len(tokens) == 0 {
@@ -119,7 +147,7 @@ func (p Policy) IsForbidden(verb string, args []string) (rule string, blocked bo
 		}
 		allFound := true
 		for _, tok := range tokens[1:] {
-			if !contains(args, tok) {
+			if !have.has(tok) {
 				allFound = false
 				break
 			}
@@ -129,6 +157,100 @@ func (p Policy) IsForbidden(verb string, args []string) (rule string, blocked bo
 		}
 	}
 	return "", false
+}
+
+// flagsWithValue are flags whose next token is a value, never a resource
+// kind; skipped so `-n namespace` can't trip a "delete namespace" rule.
+var flagsWithValue = map[string]bool{
+	"-n": true, "--namespace": true, "--context": true, "--kubeconfig": true,
+	"-c": true, "--container": true, "-l": true, "--selector": true,
+	"-f": true, "--filename": true, "-o": true, "--output": true,
+	"-s": true, "--server": true, "--user": true, "--cluster": true,
+	"--as": true, "--token": true,
+}
+
+type tokenSet struct {
+	flags map[string]bool // flag tokens, minus any =value suffix
+	words map[string]bool // normalized resource kinds, verbs and names
+}
+
+func (t tokenSet) has(tok string) bool {
+	if strings.HasPrefix(tok, "-") {
+		return t.flags[tok]
+	}
+	return t.words[tok] || t.words[normalizeKind(tok)]
+}
+
+func argTokens(args []string) tokenSet {
+	t := tokenSet{flags: map[string]bool{}, words: map[string]bool{}}
+	skip := false
+	for _, a := range args {
+		if skip {
+			skip = false
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			name, _, _ := strings.Cut(a, "=")
+			t.flags[name] = true
+			if flagsWithValue[a] {
+				skip = true
+			}
+			continue
+		}
+		for _, part := range strings.Split(a, ",") {
+			t.words[part] = true
+			if kind, name, ok := strings.Cut(part, "/"); ok {
+				t.words[kind] = true
+				t.words[normalizeKind(kind)] = true
+				t.words[name] = true
+				continue
+			}
+			t.words[normalizeKind(part)] = true
+		}
+	}
+	return t
+}
+
+// kindAliases maps kubectl short names and plurals to the singular kind.
+var kindAliases = map[string]string{
+	"ns": "namespace", "namespaces": "namespace",
+	"po": "pod", "pods": "pod",
+	"deploy": "deployment", "deployments": "deployment",
+	"svc": "service", "services": "service",
+	"sts": "statefulset", "statefulsets": "statefulset",
+	"ds": "daemonset", "daemonsets": "daemonset",
+	"rs": "replicaset", "replicasets": "replicaset",
+	"cm": "configmap", "configmaps": "configmap",
+	"secrets": "secret",
+	"pvc":     "persistentvolumeclaim", "persistentvolumeclaims": "persistentvolumeclaim",
+	"pv": "persistentvolume", "persistentvolumes": "persistentvolume",
+	"no": "node", "nodes": "node",
+	"ing": "ingress", "ingresses": "ingress",
+	"sa": "serviceaccount", "serviceaccounts": "serviceaccount",
+	"crd": "customresourcedefinition", "crds": "customresourcedefinition",
+	"customresourcedefinitions": "customresourcedefinition",
+	"hpa":                       "horizontalpodautoscaler", "horizontalpodautoscalers": "horizontalpodautoscaler",
+	"jobs": "job",
+	"cj":   "cronjob", "cronjobs": "cronjob",
+	"netpol": "networkpolicy", "networkpolicies": "networkpolicy",
+	"pdb": "poddisruptionbudget", "poddisruptionbudgets": "poddisruptionbudget",
+	"sc": "storageclass", "storageclasses": "storageclass",
+	"ev": "event", "events": "event",
+	"roles": "role", "rolebindings": "rolebinding",
+	"clusterroles": "clusterrole", "clusterrolebindings": "clusterrolebinding",
+}
+
+// normalizeKind lowercases a kind, drops an API-group suffix
+// (deployments.apps -> deployments) and maps aliases to the singular name.
+func normalizeKind(k string) string {
+	k = strings.ToLower(k)
+	if base, _, ok := strings.Cut(k, "."); ok {
+		k = base
+	}
+	if v, ok := kindAliases[k]; ok {
+		return v
+	}
+	return k
 }
 
 // UpgradeStyle returns the confirmation style that the policy mandates. If
@@ -142,18 +264,4 @@ func (p Policy) UpgradeStyle(original string) string {
 		return "typed-phrase"
 	}
 	return original
-}
-
-func contains(args []string, token string) bool {
-	for _, a := range args {
-		if a == token {
-			return true
-		}
-		// Match flag=value tokens against bare flag names too (`--all` matches
-		// `--all=true`).
-		if strings.HasPrefix(a, token+"=") {
-			return true
-		}
-	}
-	return false
 }
