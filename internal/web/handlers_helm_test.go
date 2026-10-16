@@ -38,10 +38,9 @@ exit 0
 func newTestServerWithHelm(t *testing.T) *Server {
 	t.Helper()
 	bin := fakeHelmBinary(t)
-	deps := Deps{
-		Helm:  &helm.Runner{Path: bin},
-		Audit: func(audit.Event) {},
-	}
+	deps := hermeticDeps(t)
+	deps.Helm = &helm.Runner{Path: bin}
+	deps.Audit = func(audit.Event) {}
 	s, err := New(Config{Bind: "127.0.0.1", NoOpen: true}, deps)
 	if err != nil {
 		t.Fatalf("New: %v", err)

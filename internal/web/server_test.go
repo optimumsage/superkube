@@ -5,19 +5,28 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/optimumsage/superkube/internal/audit"
+	"github.com/optimumsage/superkube/internal/kube"
 )
 
 // newTestServer builds a Server suitable for httptest: no real kube/runner,
 // just enough Deps to exercise routing and middleware.
+// hermeticDeps points the kubeconfig at a file that does not exist so no test
+// reads ~/.kube/config or runs an exec credential plugin.
+func hermeticDeps(t *testing.T) Deps {
+	t.Helper()
+	kc := filepath.Join(t.TempDir(), "no-kubeconfig")
+	return Deps{Kubeconfig: kc, Loader: kube.Loader{KubeconfigPath: kc}}
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	deps := Deps{
-		Audit: func(audit.Event) {},
-	}
+	deps := hermeticDeps(t)
+	deps.Audit = func(audit.Event) {}
 	s, err := New(Config{Bind: "127.0.0.1", NoOpen: true}, deps)
 	if err != nil {
 		t.Fatalf("New: %v", err)

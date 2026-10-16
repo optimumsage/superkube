@@ -3,6 +3,8 @@ package web
 import (
 	"context"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/optimumsage/superkube/internal/kube"
 )
@@ -25,23 +27,36 @@ const (
 
 type sessionKey struct{}
 
-// withSession pins an immutable session snapshot on the request. Every later
-// readSession call in the same request returns that snapshot, so the context
-// and namespace that were authorized, digested and audited are exactly the
-// ones passed to kubectl/helm even if kubeconfig's current-context changes
-// mid-request.
+// lazySession resolves the snapshot on first use and caches it for the rest of
+// the request.
+type lazySession struct {
+	once sync.Once
+	val  session
+}
+
+// withSession arranges for an immutable session snapshot to be pinned on the
+// request on first readSession. Every later call in the same request returns
+// that snapshot, so the context and namespace that were authorized, digested
+// and audited are exactly the ones passed to kubectl/helm even if
+// kubeconfig's current-context changes mid-request. Resolution is lazy (it
+// parses kubeconfig), so static assets and handlers that never read the
+// session pay nothing.
 func (s *Server) withSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sess := s.resolveSession(r)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, sess)))
+		if strings.HasPrefix(r.URL.Path, "/static/") || r.URL.Path == "/favicon.ico" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionKey{}, &lazySession{})))
 	})
 }
 
-// readSession returns the request's pinned snapshot (resolving it once if the
-// request did not pass through withSession).
+// readSession returns the request's pinned snapshot (resolving it once, on
+// first call).
 func (s *Server) readSession(r *http.Request) session {
-	if v, ok := r.Context().Value(sessionKey{}).(session); ok {
-		return v
+	if ls, ok := r.Context().Value(sessionKey{}).(*lazySession); ok {
+		ls.once.Do(func() { ls.val = s.resolveSession(r) })
+		return ls.val
 	}
 	return s.resolveSession(r)
 }

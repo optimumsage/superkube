@@ -194,3 +194,27 @@ func TestSessionCookiesAndSwitchBodiesValidated(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionResolvedLazilyAndSkippedForStatic(t *testing.T) {
+	e := newHardenEnv(t, hardenOpts{})
+	n := 0
+	h := e.s.withSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/static/") || r.URL.Path == "/favicon.ico" {
+			if _, ok := r.Context().Value(sessionKey{}).(*lazySession); ok {
+				t.Error("static request got a session")
+			}
+			return
+		}
+		a := e.s.readSession(r)
+		n++
+		if b := e.s.readSession(r); a != b {
+			t.Error("snapshot not stable within a request")
+		}
+	}))
+	for _, p := range []string{"/static/js/app.js", "/favicon.ico", "/x"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", p, nil))
+	}
+	if n != 1 {
+		t.Fatalf("handler ran %d times", n)
+	}
+}

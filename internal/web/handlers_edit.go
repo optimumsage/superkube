@@ -2,9 +2,7 @@ package web
 
 import (
 	"bytes"
-	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/optimumsage/superkube/internal/kubectl"
@@ -87,42 +85,4 @@ func (s *Server) apiSecretYAMLRevealed(w http.ResponseWriter, r *http.Request) {
 	out := []byte(secretyaml.Reveal(buf.String()))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write(out)
-}
-
-func splitLinesKeepEOL(b []byte) [][]byte {
-	var out [][]byte
-	start := 0
-	for i := 0; i < len(b); i++ {
-		if b[i] == '\n' {
-			out = append(out, b[start:i+1])
-			start = i + 1
-		}
-	}
-	if start < len(b) {
-		out = append(out, b[start:])
-	}
-	return out
-}
-
-func splitYAMLKeyVal(s string) (key, value string, ok bool) {
-	trimmed := strings.TrimLeft(s, " ")
-	idx := strings.Index(trimmed, ":")
-	if idx <= 0 {
-		return "", "", false
-	}
-	return trimmed[:idx], strings.TrimLeft(trimmed[idx+1:], " "), true
-}
-
-func quoteYAMLIfNeeded(v string) string {
-	if v == "" {
-		return "\"\""
-	}
-	switch strings.ToLower(v) {
-	case "true", "false", "null", "yes", "no", "on", "off", "~":
-		return fmt.Sprintf("%q", v)
-	}
-	if strings.ContainsAny(v, ":#&*!|>%@`,[]{}\"\\") || strings.HasPrefix(v, " ") || strings.HasSuffix(v, " ") {
-		return fmt.Sprintf("%q", v)
-	}
-	return v
 }
