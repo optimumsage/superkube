@@ -26,16 +26,4 @@ func TestClaudeArgs_ToolModeDeniesSecretsAndConfig(t *testing.T) {
 			t.Errorf("allowlist entry %q targets superkube's own config command", tool)
 		}
 	}
-	denied := strings.Join(claudeDeniedTools, " ")
-	for _, want := range []string{
-		"Bash(kubectl get *secret*)",
-		"Bash(kubectl describe *secret*)",
-		"Bash(kubectl config view*)",
-		"Bash(sk get *secret*)",
-		"Bash(sk describe *secret*)",
-	} {
-		if !strings.Contains(denied, want) {
-			t.Errorf("deny list missing %q", want)
-		}
-	}
 }

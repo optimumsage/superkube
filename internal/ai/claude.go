@@ -72,26 +72,36 @@ var claudeReadOnlyTools = []string{
 
 // claudeDeniedTools are passed as --disallowedTools; deny rules take
 // precedence over allow rules in Claude Code. Wildcards match anywhere in the
-// command, so `kubectl get -n x secrets -o yaml`, `kubectl get secret/foo` and
-// `kubectl get secrets,cm` are all caught, for both the kubectl and sk
-// spellings. Both `secret` and `Secret` are listed because matching is
-// case-sensitive and kubectl accepts either.
+// command, for both the kubectl and sk spellings, so `kubectl get -n x secrets
+// -o yaml`, `get secret/foo` and `get secrets,cm` are all caught.
+//
+// Matching is case-sensitive but kubectl lowercases resource names, so
+// `get SECRETS` / `SeCrEt` work. We therefore emit a rule for every case
+// variant of "ecret" (32), which covers any casing of secret/secrets/
+// secrets.v1 regardless of the leading S. The scope is deliberately all
+// verbs: a harmless command that merely contains "secret" (a pod named
+// `secret-rotator`) is blocked too, an accepted tradeoff.
 var claudeDeniedTools = buildClaudeDenied()
 
 func buildClaudeDenied() []string {
 	var out []string
 	for _, bin := range []string{"kubectl", "sk"} {
+		for mask := 0; mask < 1<<5; mask++ {
+			v := []byte("ecret")
+			for i := range v {
+				if mask&(1<<i) != 0 {
+					v[i] -= 'a' - 'A'
+				}
+			}
+			out = append(out, "Bash("+bin+" *"+string(v)+"*)")
+		}
 		for _, verb := range []string{"get", "describe"} {
 			out = append(out,
-				"Bash("+bin+" "+verb+" *secret*)",
-				"Bash("+bin+" "+verb+" *Secret*)",
 				"Bash("+bin+" "+verb+" --raw*)",
 				"Bash("+bin+" "+verb+" * --raw*)",
 			)
 		}
 		out = append(out,
-			"Bash("+bin+" *secret*)",
-			"Bash("+bin+" *Secret*)",
 			"Bash("+bin+" config view*)",
 			"Bash("+bin+" * config view*)",
 		)
