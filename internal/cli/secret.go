@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"sigs.k8s.io/yaml"
 
 	"github.com/optimumsage/superkube/internal/kubectl"
 	"github.com/optimumsage/superkube/internal/ui"
@@ -96,151 +97,99 @@ func runSecretView(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// maskSecretYAML replaces each value in the top-level `data:` block with a
-// masking placeholder. We deliberately keep the YAML structure intact (keys,
-// indentation, ordering) so the output still reads naturally and can be
-// diff'd against a known structure.
-//
-// kubectl always emits two-space indents for the data block in v1; we look
-// for lines that match `  <key>: <value>` *inside* a `data:` block. The
-// nearby keys (`metadata`, `kind`, `apiVersion`, `stringData`, etc.) live at
-// indent 0 or under different parents, so the block boundary is clear: a
-// non-indented or differently-indented line ends the block.
+const (
+	secretMaskPlaceholder  = "<base64 hidden — pass --reveal to decode>"
+	lastAppliedAnnotation  = "kubectl.kubernetes.io/last-applied-configuration"
+	lastAppliedPlaceholder = "<hidden: last-applied-configuration embeds the Secret's data>"
+	secretParseFailed      = "# secret view: could not parse kubectl output; refusing to print it unmasked\n"
+)
+
+// maskSecretYAML replaces every value under `data:`, `binaryData:` and
+// `stringData:` with a masking placeholder, for a single Secret or for each
+// item of a List (`sk secret view a b`, `-l ...`). The YAML is parsed
+// structurally rather than line-matched so nested/indented items can't slip
+// through. Output keys are re-sorted by the marshaller; values are never kept.
+// If the input can't be parsed we fail closed rather than echo it.
 func maskSecretYAML(raw string) string {
-	return transformSecretYAML(raw, func(key, value string) string {
-		_ = key
-		_ = value
-		return "<base64 hidden — pass --reveal to decode>"
-	})
+	return transformSecretYAML(raw, func(string) string { return secretMaskPlaceholder }, true)
 }
 
-// revealSecretYAML base64-decodes each value in the top-level `data:` block.
-// Values that fail to decode are replaced with `<invalid-base64>` rather than
-// panicking — a non-base64 value in `data:` would already be a kubectl bug.
-//
-// Multi-line decoded values are emitted as a YAML block scalar (`|`) so the
-// output remains valid YAML.
+// revealSecretYAML base64-decodes each value in `data:`/`binaryData:` (for a
+// single Secret or every List item). Values that fail to decode are replaced
+// with `<invalid-base64>`. `stringData` is already plaintext and is left as is.
+// The last-applied-configuration annotation is still hidden: it duplicates the
+// data and would otherwise show the base64 form alongside the decoded one.
 func revealSecretYAML(raw string) string {
-	return transformSecretYAML(raw, func(key, value string) string {
-		v := strings.TrimSpace(value)
-		// kubectl emits empty strings as `""` — preserve that for readability.
-		if v == "\"\"" || v == "''" || v == "" {
-			return "\"\""
+	return transformSecretYAML(raw, func(v string) string {
+		if v == "" {
+			return ""
 		}
-		// Strip optional quotes kubectl adds around base64 values.
-		v = strings.Trim(v, "\"'")
 		dec, err := base64.StdEncoding.DecodeString(v)
 		if err != nil {
 			return "<invalid-base64>"
 		}
-		if !strings.ContainsRune(string(dec), '\n') {
-			return yamlScalar(string(dec))
-		}
-		// Multi-line: emit as block scalar so we don't have to escape every
-		// special character. Indentation matches the data block (4 spaces here
-		// because the data key itself sits at indent 2).
-		lines := strings.Split(string(dec), "\n")
-		var sb strings.Builder
-		sb.WriteString("|\n")
-		for _, l := range lines {
-			sb.WriteString("    ")
-			sb.WriteString(l)
-			sb.WriteString("\n")
-		}
-		// Trim trailing newline added by the loop; YAML will re-add one when
-		// the line is written back.
-		return strings.TrimRight(sb.String(), "\n")
-	})
+		return string(dec)
+	}, false)
 }
 
-// transformSecretYAML walks raw line-by-line and applies fn to every `data:`
-// (and `binaryData:`) child value. The transform receives the raw key + value
-// strings and returns the replacement value (no surrounding key/indent).
-//
-// We don't pull in a full YAML parser here: kubectl's output for Secrets is
-// stable and shallow (a single nested map under `data:`/`binaryData:`), so a
-// scan based on indentation is sufficient and avoids a dep.
-func transformSecretYAML(raw string, fn func(key, value string) string) string {
-	if !strings.Contains(raw, "\ndata:") && !strings.HasPrefix(raw, "data:") &&
-		!strings.Contains(raw, "\nbinaryData:") && !strings.HasPrefix(raw, "binaryData:") {
+// transformSecretYAML parses raw (YAML or JSON), applies fn to each
+// data/binaryData value (and, when maskStringData, replaces stringData values
+// with the mask), hides the last-applied annotation, and re-serialises.
+// Documents without any of those fields are returned unchanged.
+func transformSecretYAML(raw string, fn func(string) string, maskStringData bool) string {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil || doc == nil {
+		if strings.TrimSpace(raw) == "" {
+			return raw
+		}
+		return secretParseFailed
+	}
+	changed := transformSecretObject(doc, fn, maskStringData)
+	if items, ok := doc["items"].([]any); ok {
+		for _, it := range items {
+			if m, ok := it.(map[string]any); ok && transformSecretObject(m, fn, maskStringData) {
+				changed = true
+			}
+		}
+	}
+	if !changed {
 		return raw
 	}
-	lines := strings.SplitAfter(raw, "\n")
-	var sb strings.Builder
-	sb.Grow(len(raw))
-	inDataBlock := false
-	for _, line := range lines {
-		stripped := strings.TrimRight(line, "\n")
-		switch {
-		case stripped == "data:" || stripped == "binaryData:":
-			inDataBlock = true
-			sb.WriteString(line)
-			continue
-		case strings.HasPrefix(stripped, "data: ") || strings.HasPrefix(stripped, "binaryData: "):
-			// `data: {}` (empty map) — nothing to mask, block ends immediately.
-			inDataBlock = false
-			sb.WriteString(line)
-			continue
-		}
-		if !inDataBlock {
-			sb.WriteString(line)
-			continue
-		}
-		// Block ends when we hit a line whose indentation drops back to zero or
-		// a different top-level key.
-		if stripped == "" || !strings.HasPrefix(line, "  ") {
-			inDataBlock = false
-			sb.WriteString(line)
-			continue
-		}
-		key, value, ok := splitDataLine(stripped)
-		if !ok {
-			sb.WriteString(line)
-			continue
-		}
-		sb.WriteString("  ")
-		sb.WriteString(key)
-		sb.WriteString(": ")
-		sb.WriteString(fn(key, value))
-		sb.WriteString("\n")
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return secretParseFailed
 	}
-	return sb.String()
+	return string(out)
 }
 
-// splitDataLine pulls (key, value) out of a `  key: value` line. Returns
-// ok=false if the line isn't a key/value pair (e.g. a continuation of a
-// block scalar). Keys are bare identifiers in kubectl's output, so we don't
-// need to handle quoted keys.
-func splitDataLine(s string) (key, value string, ok bool) {
-	trimmed := strings.TrimLeft(s, " ")
-	idx := strings.Index(trimmed, ":")
-	if idx <= 0 {
-		return "", "", false
+func transformSecretObject(obj map[string]any, fn func(string) string, maskStringData bool) bool {
+	changed := false
+	for _, field := range []string{"data", "binaryData"} {
+		if m, ok := obj[field].(map[string]any); ok {
+			for k, v := range m {
+				str, _ := v.(string)
+				m[k] = fn(strings.TrimSpace(str))
+				changed = true
+			}
+		}
 	}
-	key = trimmed[:idx]
-	rest := trimmed[idx+1:]
-	value = strings.TrimLeft(rest, " ")
-	return key, value, true
-}
-
-// yamlScalar quotes value if it could be misread as a YAML special token
-// (numbers, bools, leading whitespace, special chars). For most secret
-// payloads (URLs, JWTs, passwords) double-quoting is the safe bet.
-func yamlScalar(v string) string {
-	if v == "" {
-		return "\"\""
+	if maskStringData {
+		if m, ok := obj["stringData"].(map[string]any); ok {
+			for k := range m {
+				m[k] = secretMaskPlaceholder
+				changed = true
+			}
+		}
 	}
-	// Reserved special tokens or values that look numeric/boolean would
-	// otherwise change type after a round-trip; quote them.
-	switch strings.ToLower(v) {
-	case "true", "false", "null", "yes", "no", "on", "off", "~":
-		return fmt.Sprintf("%q", v)
+	if md, ok := obj["metadata"].(map[string]any); ok {
+		if ann, ok := md["annotations"].(map[string]any); ok {
+			if _, ok := ann[lastAppliedAnnotation]; ok {
+				ann[lastAppliedAnnotation] = lastAppliedPlaceholder
+				changed = true
+			}
+		}
 	}
-	// Heuristic: contains characters that could confuse a YAML parser.
-	if strings.ContainsAny(v, ":#&*!|>%@`,[]{}\"\\") || strings.HasPrefix(v, " ") || strings.HasSuffix(v, " ") {
-		return fmt.Sprintf("%q", v)
-	}
-	return v
+	return changed
 }
 
 const secretViewLongHelp = `Show a Secret as YAML.
