@@ -3,6 +3,7 @@ package ai
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -58,6 +59,7 @@ printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"answer
 func TestAntigravityRunResultError(t *testing.T) {
 	writeFakeAgy(t, `read -r line
 printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":"quota exceeded"}}'
+exit 1
 `)
 	var out bytes.Buffer
 	err := (antigravityProvider{}).Run(context.Background(), "hi", &out, RunOpts{})
@@ -95,5 +97,34 @@ func TestAntigravityRunSurfacesStderr(t *testing.T) {
 func TestAntigravityRunNilWriter(t *testing.T) {
 	if err := (antigravityProvider{}).Run(context.Background(), "hi", nil, RunOpts{}); err == nil {
 		t.Fatal("expected error for nil writer")
+	}
+}
+
+// failAfterWriter succeeds for the first n writes, then errors.
+type failAfterWriter struct {
+	n   int
+	buf bytes.Buffer
+}
+
+func (f *failAfterWriter) Write(p []byte) (int, error) {
+	if f.n <= 0 {
+		return 0, errors.New("disk full")
+	}
+	f.n--
+	return f.buf.Write(p)
+}
+
+func TestAntigravityRunPropagatesWriterError(t *testing.T) {
+	script := `read -r line
+printf '%s\n' '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"one"}}'
+printf '%s\n' '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"two"}}'
+printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"onetwo"}}'
+`
+	for _, n := range []int{1, 0} {
+		writeFakeAgy(t, script)
+		err := (antigravityProvider{}).Run(context.Background(), "hi", &failAfterWriter{n: n}, RunOpts{})
+		if err == nil || !strings.Contains(err.Error(), "disk full") {
+			t.Fatalf("n=%d: expected writer error, got %v", n, err)
+		}
 	}
 }

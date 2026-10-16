@@ -75,11 +75,27 @@ func (antigravityProvider) Run(ctx context.Context, prompt string, w io.Writer, 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("antigravity: %w", err)
 	}
-	streamed, resultErr := relayAgyEvents(stdout, w)
+	streamed, resultErr, relayErr := relayAgyEvents(stdout, w)
+	if relayErr != nil {
+		// Output was truncated (writer failed) or the stream broke: stop agy
+		// and reap it so we don't leak a process, then report the real cause.
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("antigravity: %w", relayErr)
+	}
 	waitErr := cmd.Wait()
 	if waitErr != nil {
-		if stderr.Len() > 0 {
-			return fmt.Errorf("antigravity: %w (stderr: %s)", waitErr, strings.TrimSpace(stderr.String()))
+		detail := strings.TrimSpace(stderr.String())
+		if resultErr != nil {
+			// agy reports the useful reason in its result event, not stderr.
+			if detail != "" {
+				detail = resultErr.Error() + "; " + detail
+			} else {
+				detail = resultErr.Error()
+			}
+		}
+		if detail != "" {
+			return fmt.Errorf("antigravity: %w (%s)", waitErr, detail)
 		}
 		return fmt.Errorf("antigravity: %w", waitErr)
 	}
@@ -116,9 +132,19 @@ type agyEvent struct {
 
 // relayAgyEvents copies agent_response text deltas from agy's NDJSON stream to
 // w. It reports whether any text was written and, if agy's final result event
-// carried an error status, that error. If no deltas arrived but the result has
-// a response, the response is written instead.
-func relayAgyEvents(r io.Reader, w io.Writer) (wrote bool, resultErr error) {
+// carried an error status, that error. relayErr is the first write error to w
+// or non-EOF read error; the caller must stop the subprocess when it is set. If
+// no deltas arrived but the result has a response, the response is written
+// instead.
+func relayAgyEvents(r io.Reader, w io.Writer) (wrote bool, resultErr, relayErr error) {
+	write := func(text string) bool {
+		if _, err := io.WriteString(w, text); err != nil {
+			relayErr = fmt.Errorf("write output: %w", err)
+			return false
+		}
+		wrote = true
+		return true
+	}
 	br := bufio.NewReader(r)
 	for {
 		line, err := br.ReadBytes('\n')
@@ -128,8 +154,8 @@ func relayAgyEvents(r io.Reader, w io.Writer) (wrote bool, resultErr error) {
 				switch ev.Event {
 				case "step_update":
 					if ev.StepUpdate.StepType == "agent_response" && ev.StepUpdate.TextDelta != "" {
-						if _, werr := io.WriteString(w, ev.StepUpdate.TextDelta); werr == nil {
-							wrote = true
+						if !write(ev.StepUpdate.TextDelta) {
+							return wrote, resultErr, relayErr
 						}
 					}
 				case "result":
@@ -140,15 +166,18 @@ func relayAgyEvents(r io.Reader, w io.Writer) (wrote bool, resultErr error) {
 						}
 						resultErr = errors.New(msg)
 					} else if !wrote && ev.Result.Response != "" {
-						if _, werr := io.WriteString(w, ev.Result.Response); werr == nil {
-							wrote = true
+						if !write(ev.Result.Response) {
+							return wrote, resultErr, relayErr
 						}
 					}
 				}
 			}
 		}
 		if err != nil {
-			return wrote, resultErr
+			if !errors.Is(err, io.EOF) {
+				relayErr = fmt.Errorf("read agy output: %w", err)
+			}
+			return wrote, resultErr, relayErr
 		}
 	}
 }
