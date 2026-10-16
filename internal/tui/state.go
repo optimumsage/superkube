@@ -177,10 +177,41 @@ func ColHeaders(k Kind) []string {
 type State struct {
 	mu     sync.Mutex
 	byKind map[Kind]map[string]Row
+	synced map[Kind]bool
+	errs   map[Kind]string
 }
 
 func NewState() *State {
-	return &State{byKind: map[Kind]map[string]Row{}}
+	return &State{
+		byKind: map[Kind]map[string]Row{},
+		synced: map[Kind]bool{},
+		errs:   map[Kind]string{},
+	}
+}
+
+// SetSynced marks kind's initial LIST as complete and clears any error left
+// over from before the list succeeded.
+func (s *State) SetSynced(kind Kind) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.synced[kind] = true
+	delete(s.errs, kind)
+}
+
+// SetError records the latest watch/list failure for kind (shown in the
+// status bar). Cleared by SetSynced or the next successful upsert.
+func (s *State) SetError(kind Kind, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errs[kind] = msg
+}
+
+// KindStatus reports whether kind has completed its initial sync and the
+// most recent watch error, if any.
+func (s *State) KindStatus(kind Kind) (synced bool, errMsg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.synced[kind], s.errs[kind]
 }
 
 // Upsert keeps backwards compatibility for tests/callers that thought of the
@@ -201,6 +232,8 @@ func (s *State) UpsertRow(kind Kind, row Row) {
 		s.byKind[kind] = map[string]Row{}
 	}
 	s.byKind[kind][rowKey(row)] = row
+	// An event arriving means the watch is healthy again.
+	delete(s.errs, kind)
 }
 
 // DeleteRow removes the row at (kind, key); no-op if absent.
@@ -210,19 +243,6 @@ func (s *State) DeleteRow(kind Kind, key string) {
 	if m := s.byKind[kind]; m != nil {
 		delete(m, key)
 	}
-}
-
-// Snapshot returns the current pods sorted by namespace then name. Kept for
-// backwards compatibility with the pod-centric call sites.
-func (s *State) Snapshot() []PodRow {
-	rows := s.SnapshotKind(KindPod)
-	out := make([]PodRow, 0, len(rows))
-	for _, r := range rows {
-		if p, ok := r.(PodRow); ok {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // SnapshotKind returns the rows for kind in (namespace, name) order. Returns

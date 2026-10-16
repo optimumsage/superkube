@@ -4,9 +4,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
+	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -24,18 +25,19 @@ const logBufferCap = 5000
 // a goroutine and pushes lines through a channel that the model drains via
 // tea.Cmd, so we never call tea.Program from outside.
 type logViewer struct {
+	// id tags every message this viewer emits so the model can drop stragglers
+	// from a pane the user already closed (see paneSeq).
+	id        uint64
 	pod       string
 	namespace string
 	container string
 
-	lines    []string // ring buffer
-	filter   string
-	filterOn bool
+	lines  []string // ring buffer
+	filter string
 
 	offset int // top of viewport, in *filtered* index space
 	follow bool
 
-	stream   io.ReadCloser
 	cancel   context.CancelFunc
 	streamCh chan string
 	doneCh   chan error
@@ -46,13 +48,25 @@ type logViewer struct {
 }
 
 // logLineMsg arrives when the streamer emits a line.
-type logLineMsg struct{ line string }
+type logLineMsg struct {
+	id   uint64
+	line string
+}
 
 // logEndMsg arrives when the stream closes (pod ended, error, or cancel).
-type logEndMsg struct{ err error }
+type logEndMsg struct {
+	id  uint64
+	err error
+}
+
+// paneSeq hands out unique IDs to log/text panes. Messages from a pane's
+// goroutine carry its ID; a late message from a cancelled pane must not land
+// in the pane the user opened next.
+var paneSeq atomic.Uint64
 
 func newLogViewer(pod, ns, container string) *logViewer {
 	return &logViewer{
+		id:        paneSeq.Add(1),
 		pod:       pod,
 		namespace: ns,
 		container: container,
@@ -82,7 +96,8 @@ func (v *logViewer) start(ctx context.Context, cs kubernetes.Interface) tea.Cmd 
 			v.doneCh <- err
 			return
 		}
-		v.stream = stream
+		// No v.stream field: cancelling streamCtx closes the body, so stop()
+		// needs no handle on it (and sharing one across goroutines raced).
 		defer stream.Close()
 		scanner := bufio.NewScanner(stream)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -108,14 +123,14 @@ func (v *logViewer) waitLine() tea.Cmd {
 		if !ok {
 			return nil
 		}
-		return logLineMsg{line: s}
+		return logLineMsg{id: v.id, line: s}
 	}
 }
 
 func (v *logViewer) waitDone() tea.Cmd {
 	return func() tea.Msg {
 		err := <-v.doneCh
-		return logEndMsg{err: err}
+		return logEndMsg{id: v.id, err: err}
 	}
 }
 
@@ -136,9 +151,6 @@ func (v *logViewer) stop() {
 	if v.cancel != nil {
 		v.cancel()
 	}
-	if v.stream != nil {
-		_ = v.stream.Close()
-	}
 }
 
 // filtered returns the indices into v.lines that match the current filter.
@@ -147,10 +159,10 @@ func (v *logViewer) filtered() []string {
 	if v.filter == "" {
 		return v.lines
 	}
-	q := strings.ToLower(v.filter)
+	re := foldRegexp(v.filter)
 	out := make([]string, 0, len(v.lines))
 	for _, l := range v.lines {
-		if strings.Contains(strings.ToLower(l), q) {
+		if re.MatchString(l) {
 			out = append(out, l)
 		}
 	}
@@ -213,32 +225,52 @@ func max0(n int) int {
 	return n
 }
 
+// foldCache memoizes compiled case-insensitive matchers; render calls the
+// highlighter once per visible line per frame, so recompiling would be wasteful.
+var (
+	foldMu    sync.Mutex
+	foldCache = map[string]*regexp.Regexp{}
+)
+
+// foldRegexp returns a case-insensitive literal matcher for needle. We use
+// regexp (?i) with QuoteMeta rather than lower-casing the haystack because
+// strings.ToLower can change byte length ("İ" -> "i̇", "Ⱥ" -> "ⱥ"), so byte
+// offsets found in the lowered copy are not valid in the original string.
+// Offsets reported by regexp always refer to the string that was matched.
+func foldRegexp(needle string) *regexp.Regexp {
+	foldMu.Lock()
+	defer foldMu.Unlock()
+	if re, ok := foldCache[needle]; ok {
+		return re
+	}
+	if len(foldCache) > 64 {
+		foldCache = map[string]*regexp.Regexp{}
+	}
+	re := regexp.MustCompile("(?i)" + regexp.QuoteMeta(needle))
+	foldCache[needle] = re
+	return re
+}
+
 // highlight wraps every case-insensitive occurrence of needle in line with a
-// styled span. We do this by lower-casing the line for the search and using
-// the resulting byte indices to slice the original (UTF-8 safe because
-// strings.ToLower preserves byte-length for ASCII and uses the same byte
-// boundaries for non-ASCII mapped runes — close enough for logs in practice).
+// styled span. Matching happens on the original string, so it is safe for any
+// Unicode input.
 func highlight(line, needle string) string {
 	if needle == "" || line == "" {
 		return line
 	}
-	lc := strings.ToLower(line)
-	nc := strings.ToLower(needle)
+	locs := foldRegexp(needle).FindAllStringIndex(line, -1)
+	if len(locs) == 0 {
+		return line
+	}
 	var b strings.Builder
 	i := 0
-	for {
-		idx := strings.Index(lc[i:], nc)
-		if idx < 0 {
-			b.WriteString(line[i:])
-			return b.String()
-		}
-		b.WriteString(line[i : i+idx])
-		b.WriteString(logMatchStyle.Render(line[i+idx : i+idx+len(needle)]))
-		i += idx + len(needle)
-		if i >= len(line) {
-			return b.String()
-		}
+	for _, loc := range locs {
+		b.WriteString(line[i:loc[0]])
+		b.WriteString(logMatchStyle.Render(line[loc[0]:loc[1]]))
+		i = loc[1]
 	}
+	b.WriteString(line[i:])
+	return b.String()
 }
 
 // statusLine renders the small header line shown above the log viewport.

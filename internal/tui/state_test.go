@@ -33,7 +33,7 @@ func TestStateUpsertDeleteSnapshot(t *testing.T) {
 	s.Upsert(makePod("default", "a", corev1.PodRunning, 1, 1))
 	s.Upsert(makePod("kube-system", "z", corev1.PodPending, 0, 1))
 
-	snap := s.Snapshot()
+	snap := podSnapshot(s)
 	if len(snap) != 3 {
 		t.Fatalf("snapshot len = %d, want 3", len(snap))
 	}
@@ -47,7 +47,7 @@ func TestStateUpsertDeleteSnapshot(t *testing.T) {
 	}
 
 	s.Delete(makePod("default", "a", corev1.PodRunning, 1, 1))
-	if got := len(s.Snapshot()); got != 2 {
+	if got := len(podSnapshot(s)); got != 2 {
 		t.Errorf("after delete len = %d, want 2", got)
 	}
 }
@@ -56,7 +56,7 @@ func TestStateUpdatesExistingPod(t *testing.T) {
 	s := NewState()
 	s.Upsert(makePod("default", "p", corev1.PodPending, 0, 1))
 	s.Upsert(makePod("default", "p", corev1.PodRunning, 1, 1))
-	snap := s.Snapshot()
+	snap := podSnapshot(s)
 	if len(snap) != 1 {
 		t.Fatalf("want 1 pod after re-upsert, got %d", len(snap))
 	}
@@ -122,4 +122,15 @@ func TestIngressRowCols(t *testing.T) {
 	if len(got) != 2 || got[0] != "nginx" || got[1] != "a.example.com,b.example.com" {
 		t.Errorf("IngressRow.Cols() = %v", got)
 	}
+}
+
+// podSnapshot flattens the pod rows of s for assertions.
+func podSnapshot(s *State) []PodRow {
+	var out []PodRow
+	for _, r := range s.SnapshotKind(KindPod) {
+		if p, ok := r.(PodRow); ok {
+			out = append(out, p)
+		}
+	}
+	return out
 }
