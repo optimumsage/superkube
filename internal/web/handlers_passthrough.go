@@ -42,7 +42,12 @@ func (s *Server) apiPassthrough(w http.ResponseWriter, r *http.Request) {
 	sess := s.readSession(r)
 	// Policy applies to the palette exactly as to the dedicated pages, so a
 	// `forbid: ["get secret"]` rule cannot be sidestepped from Ctrl+K.
-	if s.gateForbidden(w, sess, body.Argv[0], body.Argv[1:]) {
+	// Evaluated on the effective args, i.e. including the session's -n.
+	gateArgs := body.Argv[1:]
+	if !hasFlagN(body.Argv) && sess.Namespace != "" {
+		gateArgs = append(append([]string{}, gateArgs...), "-n", sess.Namespace)
+	}
+	if s.gateForbidden(w, sess, body.Argv[0], gateArgs) {
 		return
 	}
 	args := sess.kubectlArgs(body.Argv)
@@ -104,17 +109,24 @@ var paletteConnFlags = []string{
 	"--kubeconfig", "--context", "--server", "--token", "--user", "--cluster",
 	"--as", "--as-group", "--as-uid", "--certificate-authority", "--client-key",
 	"--client-certificate", "--insecure-skip-tls-verify", "--tls-server-name",
-	"--username", "--password", "--proxy-url", "--cache-dir",
+	"--username", "--password", "--proxy-url", "--cache-dir", "--token-file",
 }
 
-// paletteStreamFlags would turn a one-shot read into a long-lived stream (or
-// read a local file), neither of which the buffered palette supports.
-var paletteStreamFlags = []string{"--watch", "--watch-only", "--follow", "--output-watch-events"}
+// paletteStreamFlags would turn a one-shot read into a long-lived stream, or
+// make the server read a server-local file / directory on the browser's
+// behalf (-f/--filename, -k/--kustomize), neither of which the palette allows.
+var paletteStreamFlags = []string{
+	"--watch", "--watch-only", "--follow", "--output-watch-events",
+	"--filename", "--kustomize",
+}
+
+// shortValueFlags take a value, so the rest of a glued short cluster is data
+// (`-lapp=web`, `-ndefault`) and must not be scanned for f/w/k.
+const shortValueFlags = "lnosctv"
 
 // paletteRejectedFlag returns the first offending flag in argv[1:], or "".
 // Everything after a bare "--" is positional data and is not inspected.
 func paletteRejectedFlag(argv []string) string {
-	stream := argv[0] != "diff" // diff legitimately takes -f <file>
 	for _, a := range argv[1:] {
 		if a == "--" {
 			return ""
@@ -131,14 +143,20 @@ func paletteRejectedFlag(argv []string) string {
 		if !strings.HasPrefix(a, "--") && strings.HasPrefix(a, "-s") {
 			return "-s"
 		}
-		if stream {
-			for _, f := range paletteStreamFlags {
-				if flagIs(a, f) {
-					return f
-				}
+		for _, f := range paletteStreamFlags {
+			if flagIs(a, f) {
+				return f
 			}
-			if a == "-w" || strings.HasPrefix(a, "-w=") || a == "-f" || strings.HasPrefix(a, "-f=") {
-				return a[:2]
+		}
+		if !strings.HasPrefix(a, "--") {
+			// Short cluster: -f/path, -wX, -kdir, -Afw ...
+			for _, c := range a[1:] {
+				if c == 'f' || c == 'w' || c == 'k' {
+					return "-" + string(c)
+				}
+				if strings.ContainsRune(shortValueFlags, c) {
+					break
+				}
 			}
 		}
 	}

@@ -136,3 +136,34 @@ func TestEditHonoursEditKindRule(t *testing.T) {
 		t.Errorf("%d %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestPassthroughGateSeesSessionNamespace(t *testing.T) {
+	e := newHardenEnv(t, hardenOpts{policy: forbid("get -n kube-system")})
+	rr := e.do(t, "/api/v1/passthrough", `{"argv":["get","pods"]}`, &http.Cookie{Name: sessNsCookie, Value: "kube-system"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("session ns must be gated: %d %s", rr.Code, rr.Body.String())
+	}
+	rr = e.do(t, "/api/v1/passthrough", `{"argv":["get","pods"]}`, &http.Cookie{Name: sessNsCookie, Value: "default"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("control: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPassthroughRejectsServerLocalFileFlags(t *testing.T) {
+	e := newHardenEnv(t, hardenOpts{})
+	for _, argv := range []string{
+		`["diff","-f","/etc/passwd"]`, `["diff","-f/etc/passwd"]`, `["get","--filename=x"]`,
+		`["get","-k","dir"]`, `["get","--kustomize=dir"]`, `["get","-kdir"]`, `["get","pods","-wX"]`,
+		`["get","--token-file=/x"]`, `["get","-Aw"]`,
+	} {
+		if rr := e.do(t, "/api/v1/passthrough", `{"argv":`+argv+`}`); rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d", argv, rr.Code)
+		}
+	}
+	// glued label selector / namespace values are not mistaken for flags.
+	for _, argv := range []string{`["get","pods","-lapp=web"]`, `["get","pods","-nfoo"]`, `["get","pods","-owide"]`} {
+		if rr := e.do(t, "/api/v1/passthrough", `{"argv":`+argv+`}`); rr.Code != http.StatusOK {
+			t.Errorf("%s: %d %s", argv, rr.Code, rr.Body.String())
+		}
+	}
+}
