@@ -57,18 +57,20 @@ var (
 	inlinePairRE = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*)=("[^"]*"|'[^']*'|[^\s&"',;]+)`)
 )
 
-// blockHeaderRE matches `key: |`, `key: >-`, `key: |2+` etc. (value is a YAML
-// block scalar whose body is on the following, more-indented lines).
+// blockHeaderRE matches `key: |`, `"key": >-`, `- key: |2+ # comment` etc.
+// (value is a YAML block scalar whose body is on the following, more-indented
+// lines). Groups: 1 indent+optional "- ", 2 open quote, 3 key, 4 close quote.
 var (
-	blockHeaderRE = regexp.MustCompile(`^(\s*(?:-\s+)?)([A-Za-z0-9_.-]+)\s*:\s*[|>][+-]?[0-9]?[+-]?\s*$`)
+	blockHeaderRE = regexp.MustCompile(`^(\s*(?:-\s+)?)(["']?)([A-Za-z0-9_.-]+)(["']?)\s*:\s*[|>][+-]?[0-9]?[+-]?\s*(?:#.*)?$`)
 	nameKeyRE     = regexp.MustCompile(`(?i)^[A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*$`)
 	envNameLineRE = regexp.MustCompile(`(?i)^\s*-?\s*name:\s*["']?[A-Za-z0-9_.-]*` + nameRE + `[A-Za-z0-9_.-]*["']?\s*$`)
 )
 
 // redactBlockScalars masks the body of block scalars whose key is
 // credential-named (`tls.key: |`) or is the `value:` of a credential-named
-// pod-spec env entry. The line-oriented regexes below only see the header
-// line, so without this the indented body would pass through.
+// pod-spec env entry (name either before or after value in the item). The
+// line-oriented regexes below only see the header line, so without this the
+// indented body would pass through.
 func redactBlockScalars(s string) string {
 	lines := strings.Split(s, "\n")
 	out := make([]string, 0, len(lines))
@@ -76,22 +78,36 @@ func redactBlockScalars(s string) string {
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 		m := blockHeaderRE.FindStringSubmatch(line)
-		sensitive := m != nil && (nameKeyRE.MatchString(m[2]) || (m[2] == "value" && envNameLineRE.MatchString(prev)))
+		if m == nil {
+			out = append(out, line)
+			prev = line
+			continue
+		}
+		// Body: following blank lines and lines indented deeper than the key.
+		indent := len(m[1])
+		end := i
+		for end+1 < len(lines) {
+			next := lines[end+1]
+			if strings.TrimSpace(next) != "" && len(next)-len(strings.TrimLeft(next, " \t")) <= indent {
+				break
+			}
+			end++
+		}
+		sensitive := nameKeyRE.MatchString(m[3])
+		if !sensitive && m[3] == "value" {
+			sensitive = envNameLineRE.MatchString(prev)
+			if !sensitive && end+1 < len(lines) {
+				sensitive = envNameLineRE.MatchString(lines[end+1])
+			}
+		}
 		if !sensitive {
 			out = append(out, line)
 			prev = line
 			continue
 		}
-		out = append(out, m[1]+m[2]+": <redacted>")
-		indent := len(m[1])
-		for i+1 < len(lines) {
-			next := lines[i+1]
-			if strings.TrimSpace(next) != "" && len(next)-len(strings.TrimLeft(next, " \t")) <= indent {
-				break
-			}
-			i++
-		}
+		out = append(out, m[1]+m[2]+m[3]+m[4]+": <redacted>")
 		prev = line
+		i = end
 	}
 	return strings.Join(out, "\n")
 }

@@ -30,6 +30,7 @@ func alive(cmd *exec.Cmd) bool { return cmd.Process.Signal(syscall.Signal(0)) ==
 // target is missing from its command line.
 func TestStopSkipsLookalikeProcess(t *testing.T) {
 	setupTmpState(t)
+	requirePS(t)
 	cmd := startLookalike(t, "port-forward-notes.md")
 	e := Entry{ID: "pf-look", Target: "svc/web", Ports: []string{"1:1"}, PID: cmd.Process.Pid, StartedAt: time.Now()}
 	if err := Add(e); err != nil {
@@ -52,6 +53,7 @@ func TestStopSkipsLookalikeProcess(t *testing.T) {
 // start time means the PID was reused.
 func TestStopSkipsStartTimeMismatch(t *testing.T) {
 	setupTmpState(t)
+	requirePS(t)
 	cmd := startLookalike(t, "port-forward", "pod/x")
 	e := Entry{ID: "pf-st", Target: "pod/x", Ports: []string{"1:1"}, PID: cmd.Process.Pid,
 		StartedAt: time.Now(), ProcStart: "Mon Jan  1 00:00:00 2001"}
@@ -72,6 +74,7 @@ func TestStopSkipsStartTimeMismatch(t *testing.T) {
 // start time recorded matches, so Stop terminates it.
 func TestStopKillsOwnedProcess(t *testing.T) {
 	setupTmpState(t)
+	requirePS(t)
 	cmd := startLookalike(t, "port-forward", "pod/x")
 	go func() { _ = cmd.Wait() }() // reap so liveness probe sees it die
 	st, err := processStartTime(cmd.Process.Pid)
@@ -97,6 +100,7 @@ func TestStopKillsOwnedProcess(t *testing.T) {
 // Old state files have no ProcStart: fall back to cmdline + target.
 func TestOwnsProcessLegacyEntryFallsBack(t *testing.T) {
 	setupTmpState(t)
+	requirePS(t)
 	cmd := startLookalike(t, "port-forward", "pod/x")
 	e := Entry{ID: "pf-old", Target: "pod/x", PID: cmd.Process.Pid}
 	if got := identify(e); got != identOwned {

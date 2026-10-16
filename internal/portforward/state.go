@@ -187,6 +187,9 @@ func Remove(id string) (removed []Entry, err error) {
 // the entries that were removed.
 func Stop(id string) (stopped []Entry, err error) {
 	var unknown []string
+	var toKill []Entry
+	// Classify and persist under the lock, but signal after releasing it:
+	// Kill can wait up to 2s per PID and must not stall other sk processes.
 	err = withLock(func() error {
 		current, err := readEntries()
 		if err != nil {
@@ -201,7 +204,7 @@ func Stop(id string) (stopped []Entry, err error) {
 			}
 			switch identify(e) {
 			case identOwned:
-				_ = Kill(e.PID)
+				toKill = append(toKill, e)
 				stopped = append(stopped, e)
 				changed = true
 			case identStale:
@@ -217,6 +220,13 @@ func Stop(id string) (stopped []Entry, err error) {
 		}
 		return writeLocked(kept)
 	})
+	for _, e := range toKill {
+		// Re-verify right before signalling; the PID could have been reused
+		// while we were unlocked.
+		if identify(e) == identOwned {
+			_ = Kill(e.PID)
+		}
+	}
 	if err == nil && len(unknown) > 0 {
 		err = fmt.Errorf("could not verify process identity for %s; not signalled and left in the state file (is `ps` available?)", strings.Join(unknown, ", "))
 	}
@@ -290,14 +300,21 @@ var errProcessGone = errors.New("process not found")
 func psField(pid int, field string) (string, error) {
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", field+"=").Output()
 	if err != nil {
+		// A failing ps proves nothing by itself (permissions, sandboxing,
+		// missing binary). Only call the process gone when it is
+		// independently confirmed absent; otherwise the caller gets a plain
+		// error and treats the identity as unknown.
 		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(strings.TrimSpace(string(out))) == 0 {
+		if errors.As(err, &ee) && len(strings.TrimSpace(string(out))) == 0 && !isAlive(pid) {
 			return "", errProcessGone
 		}
 		return "", err
 	}
 	v := strings.TrimSpace(string(out))
 	if v == "" {
+		if isAlive(pid) {
+			return "", errors.New("ps returned no output for a live process")
+		}
 		return "", errProcessGone
 	}
 	return v, nil

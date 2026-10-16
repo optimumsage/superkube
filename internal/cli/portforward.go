@@ -110,18 +110,17 @@ func newPFStopCmd() *cobra.Command {
 		Short: "Terminate a tracked port-forward",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Stop can return stopped entries AND an error (one entry could
+			// not be verified): report what was stopped before failing.
 			stopped, err := portforward.Stop(args[0])
-			if err != nil {
-				return err
-			}
-			if len(stopped) == 0 {
+			if len(stopped) == 0 && err == nil {
 				return fmt.Errorf("no port-forward matched %q", args[0])
 			}
 			for _, e := range stopped {
 				fmt.Fprintln(cmd.OutOrStdout(),
 					ui.Render(ui.Success, fmt.Sprintf("stopped %s (pid %d): %s", e.ID, e.PID, e.Target)))
 			}
-			return nil
+			return err
 		},
 	}
 }

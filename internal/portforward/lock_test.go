@@ -61,7 +61,8 @@ func TestAddBlocksOnCrossProcessLock(t *testing.T) {
 // TestStopDoesNotKillReusedPID: a state entry whose PID now belongs to an
 // unrelated process (e.g. after a reboot) must be dropped, not signalled.
 func TestStopDoesNotKillReusedPID(t *testing.T) {
-	setupTmpState(t) // real processCommand: sleep is not a port-forward
+	setupTmpState(t)
+	requirePS(t) // real processCommand: sleep is not a port-forward
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot start sleep: %v", err)

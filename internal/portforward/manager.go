@@ -72,6 +72,8 @@ func Start(opts StartOpts) (Entry, error) {
 	if err := cmd.Start(); err != nil {
 		return Entry{}, fmt.Errorf("start kubectl port-forward: %w", err)
 	}
+	// Capture the PID first: Release() resets Process.Pid to -1.
+	pid := cmd.Process.Pid
 	// Release so we don't hold a zombie reference. Liveness will be polled
 	// from the state file later.
 	if err := cmd.Process.Release(); err != nil {
@@ -85,7 +87,7 @@ func Start(opts StartOpts) (Entry, error) {
 		Ports:      opts.Ports,
 		Namespace:  opts.Namespace,
 		Context:    opts.Context,
-		PID:        cmd.Process.Pid,
+		PID:        pid,
 		StartedAt:  time.Now().UTC(),
 		LogPath:    logPath,
 		Kubeconfig: opts.Kubeconfig,
