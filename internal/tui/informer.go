@@ -2,35 +2,15 @@ package tui
 
 import (
 	"context"
-	"io"
-	"os"
 	"time"
 
-	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
 )
-
-// quietClientLogs silences klog (and client-go's contextual logger) while the
-// TUI owns the terminal. Reflector/watch failures otherwise print straight to
-// stderr and paint over the alt-screen. The returned func restores logging.
-// Errors are not lost: StartInformers surfaces them in the status bar via
-// State.SetError.
-func quietClientLogs() (restore func()) {
-	klog.LogToStderr(false)
-	klog.SetOutput(io.Discard)
-	klog.SetLogger(logr.Discard())
-	return func() {
-		klog.ClearLogger()
-		klog.SetOutput(os.Stderr)
-		klog.LogToStderr(true)
-	}
-}
 
 // StartInformers wires informers for Pods, ConfigMaps, Secrets, and Ingresses,
 // each writing into state. When ns is empty all namespaces are watched.

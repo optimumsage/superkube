@@ -18,7 +18,7 @@ func TestTableToFrame(t *testing.T) {
 			{Cells: []interface{}{"coredns-2", "0/1", "Pending"}},
 		},
 	}
-	f := tableToFrame(tbl, false)
+	f := tableToFrame(tbl, false, false)
 	if got, want := f.Headers, []string{"NAME", "READY", "STATUS"}; !equalStr(got, want) {
 		t.Errorf("headers = %v, want %v", got, want)
 	}
@@ -40,7 +40,7 @@ func TestTableToFrameAllNamespaces(t *testing.T) {
 			{Cells: []interface{}{"coredns-1"}, Object: runtime.RawExtension{Raw: row1}},
 		},
 	}
-	f := tableToFrame(tbl, true)
+	f := tableToFrame(tbl, true, false)
 	if got, want := f.Headers, []string{"NAMESPACE", "NAME"}; !equalStr(got, want) {
 		t.Errorf("headers = %v, want %v", got, want)
 	}

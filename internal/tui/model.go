@@ -12,8 +12,9 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
-
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/optimumsage/superkube/internal/kube"
 )
 
 // ProducerFn streams the output of a TUI action into w. ns/name identify the
@@ -48,7 +49,7 @@ func Run(ctx context.Context, opts Options) error {
 	state := NewState()
 	// client-go logs through klog straight to stderr, which would paint over
 	// the alt-screen. Failures surface in the status bar instead.
-	defer quietClientLogs()()
+	defer kube.QuietClientLogs()()
 	if _, err := StartInformers(ctx, opts.Clientset, opts.Namespace, state); err != nil {
 		return fmt.Errorf("start informers: %w", err)
 	}
