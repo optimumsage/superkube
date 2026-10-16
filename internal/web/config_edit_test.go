@@ -9,11 +9,6 @@ import (
 	"github.com/optimumsage/superkube/internal/config"
 )
 
-func putConfig(e *hardenEnv, t *testing.T, body string) *http.Response {
-	t.Helper()
-	return e.doMethod(t, "PUT", "/api/v1/config", body).Result()
-}
-
 func TestConfigPutNeedsTypedConfirmAndIsAudited(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	path := config.ConfigFile()
