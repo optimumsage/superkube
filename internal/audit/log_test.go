@@ -17,8 +17,6 @@ import (
 func TestConcurrentRecord(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", tmp)
-	// Reset state derived from env.
-	Disabled = false
 
 	const writers = 8
 	const perWriter = 50
@@ -44,7 +42,7 @@ func TestConcurrentRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	count := 0
 	scanner := bufio.NewScanner(f)
@@ -75,5 +73,35 @@ func TestRedactArgv_JWT(t *testing.T) {
 	got := redactArgv([]string{"get", "pods", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"})
 	if strings.Contains(strings.Join(got, " "), "eyJhbGci") {
 		t.Errorf("JWT leaked: %v", got)
+	}
+}
+
+func TestRedactArgv_Table(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"from-literal eq", []string{"--from-literal=k=v"}, []string{"--from-literal=k=<redacted>"}},
+		{"from-literal space", []string{"--from-literal", "k=v"}, []string{"--from-literal", "k=<redacted>"}},
+		{"token eq", []string{"--token=abc"}, []string{"--token=<redacted>"}},
+		{"token space", []string{"--token", "abc", "get"}, []string{"--token", "<redacted>", "get"}},
+		{"password eq", []string{"--password=pw"}, []string{"--password=<redacted>"}},
+		{"password space", []string{"--password", "pw"}, []string{"--password", "<redacted>"}},
+		{"docker-password eq", []string{"--docker-password=pw"}, []string{"--docker-password=<redacted>"}},
+		{"docker-password space", []string{"--docker-password", "pw"}, []string{"--docker-password", "<redacted>"}},
+		{"username kept", []string{"--username", "bob"}, []string{"--username", "bob"}},
+		{"client-key path kept", []string{"--client-key", "/p/key"}, []string{"--client-key", "/p/key"}},
+		{"trailing flag no value", []string{"--token"}, []string{"--token"}},
+	}
+	for _, tc := range cases {
+		in := append([]string(nil), tc.in...)
+		got := redactArgv(in)
+		if strings.Join(got, "\x00") != strings.Join(tc.want, "\x00") {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+		if strings.Join(in, "\x00") != strings.Join(tc.in, "\x00") {
+			t.Errorf("%s: input mutated", tc.name)
+		}
 	}
 }

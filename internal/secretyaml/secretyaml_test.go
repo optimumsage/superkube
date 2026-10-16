@@ -1,4 +1,4 @@
-package cli
+package secretyaml
 
 import (
 	"strings"
@@ -16,7 +16,7 @@ data:
   password: c2VjcmV0
 type: Opaque
 `
-	got := maskSecretYAML(in)
+	got := Mask(in)
 
 	// Structure is preserved: keys, metadata, type all survive verbatim.
 	for _, want := range []string{
@@ -52,7 +52,7 @@ data:
   password: c2VjcmV0
 type: Opaque
 `
-	got := revealSecretYAML(in)
+	got := Reveal(in)
 
 	if !strings.Contains(got, "username: mohsin") {
 		t.Errorf("expected decoded username=mohsin:\n%s", got)
@@ -69,7 +69,7 @@ func TestRevealSecretYAML_InvalidBase64(t *testing.T) {
 	in := `data:
   bad: "@not-base64@"
 `
-	got := revealSecretYAML(in)
+	got := Reveal(in)
 	if !strings.Contains(got, "<invalid-base64>") {
 		t.Errorf("expected <invalid-base64> sentinel:\n%s", got)
 	}
@@ -79,7 +79,7 @@ func TestRevealSecretYAML_EmptyValue(t *testing.T) {
 	in := `data:
   blank: ""
 `
-	got := revealSecretYAML(in)
+	got := Reveal(in)
 	if !strings.Contains(got, "blank: \"\"") {
 		t.Errorf("empty value should round-trip as \"\":\n%s", got)
 	}
@@ -91,7 +91,7 @@ func TestRevealSecretYAML_MultilineDecoded(t *testing.T) {
 	in := `data:
   cert: bGluZTEKbGluZTIK
 `
-	got := revealSecretYAML(in)
+	got := Reveal(in)
 	// Multi-line decoded values should use the YAML block-scalar form.
 	if !strings.Contains(got, "cert: |") {
 		t.Errorf("expected block scalar marker `|`:\n%s", got)
@@ -110,7 +110,7 @@ spec:
   ports:
   - port: 80
 `
-	got := maskSecretYAML(in)
+	got := Mask(in)
 	if got != in {
 		t.Errorf("manifests without data block should pass through unchanged.\nGot:\n%s", got)
 	}
@@ -124,7 +124,7 @@ kind: Secret
 binaryData:
   ca.crt: ZmFrZQ==
 `
-	got := maskSecretYAML(in)
+	got := Mask(in)
 	if strings.Contains(got, "ZmFrZQ==") {
 		t.Errorf("binaryData value leaked:\n%s", got)
 	}
@@ -137,7 +137,7 @@ func TestTransformSecretYAML_EmptyDataMap(t *testing.T) {
 	in := `data: {}
 type: Opaque
 `
-	got := maskSecretYAML(in)
+	got := Mask(in)
 	if !strings.Contains(got, "type: Opaque") {
 		t.Errorf("type key after empty data was eaten:\n%s", got)
 	}
@@ -146,23 +146,76 @@ type: Opaque
 	}
 }
 
-func TestSplitDataLine(t *testing.T) {
-	cases := []struct {
-		in           string
-		wantK, wantV string
-		wantOK       bool
-	}{
-		{"  username: bW9oc2lu", "username", "bW9oc2lu", true},
-		{"  blank: \"\"", "blank", "\"\"", true},
-		{"    indented: deeper", "indented", "deeper", true},
-		{"not-a-pair", "", "", false},
-		{":", "", "", false},
-	}
-	for _, tc := range cases {
-		k, v, ok := splitDataLine(tc.in)
-		if k != tc.wantK || v != tc.wantV || ok != tc.wantOK {
-			t.Errorf("splitDataLine(%q) = (%q, %q, %v); want (%q, %q, %v)",
-				tc.in, k, v, ok, tc.wantK, tc.wantV, tc.wantOK)
+func TestMaskSecretYAML_LastAppliedAnnotation(t *testing.T) {
+	in := `apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","data":{"password":"c3VwZXJzZWNyZXQ="},"kind":"Secret"}
+  name: s
+data:
+  password: c3VwZXJzZWNyZXQ=
+`
+	for name, fn := range map[string]func(string) string{"mask": Mask, "reveal": Reveal} {
+		got := fn(in)
+		if strings.Contains(got, "c3VwZXJzZWNyZXQ=") {
+			t.Errorf("%s: annotation leaked base64:\n%s", name, got)
 		}
+		if !strings.Contains(got, "last-applied-configuration") {
+			t.Errorf("%s: annotation key should remain:\n%s", name, got)
+		}
+	}
+}
+
+func TestMaskSecretYAML_ListAndStringData(t *testing.T) {
+	in := `apiVersion: v1
+items:
+- apiVersion: v1
+  data:
+    password: c2VjcmV0MQ==
+  kind: Secret
+  metadata:
+    name: a
+  stringData:
+    token: plaintext-one
+- apiVersion: v1
+  data:
+    password: c2VjcmV0Mg==
+  kind: Secret
+  metadata:
+    name: b
+kind: List
+`
+	got := Mask(in)
+	for _, leaked := range []string{"c2VjcmV0MQ==", "c2VjcmV0Mg==", "plaintext-one"} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("list output leaked %q:\n%s", leaked, got)
+		}
+	}
+	for _, want := range []string{"name: a", "name: b", "password:", "token:"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRevealSecretYAML_List(t *testing.T) {
+	in := `items:
+- data:
+    password: c2VjcmV0MQ==
+  kind: Secret
+kind: List
+`
+	got := Reveal(in)
+	if !strings.Contains(got, "password: secret1") {
+		t.Errorf("list item not decoded:\n%s", got)
+	}
+}
+
+func TestMaskSecretYAML_UnparseableFailsClosed(t *testing.T) {
+	got := Mask("data:\n  a: [unterminated\n  b: c2VjcmV0\n")
+	if strings.Contains(got, "c2VjcmV0") {
+		t.Errorf("unparseable input leaked:\n%s", got)
 	}
 }
