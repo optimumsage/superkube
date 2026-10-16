@@ -77,6 +77,31 @@ func EffectivePolicy(cfg *config.Config, currentContext string) Policy {
 	return p
 }
 
+// EffectivePolicyFor resolves policy for several candidate contexts at once,
+// failing closed: forbid rules are the union over all candidates and
+// require_typed_confirm is OR'd. contexts[0] is the best guess and supplies
+// MatchedPattern/Banner (falling back to the first candidate that has one).
+// Used when argv scanning can't prove which context kubectl will really use.
+func EffectivePolicyFor(cfg *config.Config, contexts []string) Policy {
+	var out Policy
+	for i, c := range contexts {
+		p := EffectivePolicy(cfg, c)
+		if i == 0 {
+			out = p
+			continue
+		}
+		out.RequireTypedConfirm = out.RequireTypedConfirm || p.RequireTypedConfirm
+		out.Forbidden = append(out.Forbidden, p.Forbidden...)
+		if out.MatchedPattern == "" {
+			out.MatchedPattern = p.MatchedPattern
+			if out.Banner == "" {
+				out.Banner = p.Banner
+			}
+		}
+	}
+	return out
+}
+
 // specificity ranks a glob: patterns without wildcards beat any glob; among
 // globs, more literal characters means more specific.
 func specificity(pattern string) int {
@@ -146,8 +171,8 @@ func (p Policy) IsForbidden(verb string, args []string) (rule string, blocked bo
 			continue
 		}
 		allFound := true
-		for _, tok := range tokens[1:] {
-			if !have.has(tok) {
+		for _, req := range ruleTokens(tokens[1:]) {
+			if !have.has(req) {
 				allFound = false
 				break
 			}
@@ -159,44 +184,57 @@ func (p Policy) IsForbidden(verb string, args []string) (rule string, blocked bo
 	return "", false
 }
 
-// flagsWithValue are flags whose next token is a value, never a resource
-// kind; skipped so `-n namespace` can't trip a "delete namespace" rule.
-var flagsWithValue = map[string]bool{
-	"-n": true, "--namespace": true, "--context": true, "--kubeconfig": true,
-	"-c": true, "--container": true, "-l": true, "--selector": true,
-	"-f": true, "--filename": true, "-o": true, "--output": true,
-	"-s": true, "--server": true, "--user": true, "--cluster": true,
-	"--as": true, "--token": true,
+// token is one comparable unit of an argv or a forbid rule. Flags compare by
+// canonical long name, so `-n x`, `-n=x`, `-nx`, `--namespace x` and
+// `--namespace=x` are all the same association.
+type token struct {
+	word   string // set for positionals
+	flag   string // canonical flag name; empty for positionals
+	val    string
+	hasVal bool
+}
+
+func ruleTokens(fields []string) []token {
+	var out []token
+	for i := 0; i < len(fields); i++ {
+		if f, ok := FlagAt(fields, i); ok {
+			t := token{flag: f.Name, val: f.Val, hasVal: f.HasVal}
+			if f.UsesNext {
+				t.val, t.hasVal = fields[i+1], true
+				i++
+			}
+			out = append(out, t)
+			continue
+		}
+		out = append(out, token{word: fields[i]})
+	}
+	return out
 }
 
 type tokenSet struct {
-	flags map[string]bool // flag tokens, minus any =value suffix
-	words map[string]bool // normalized resource kinds, verbs and names
+	flags map[string]bool // flag present, any value
+	assoc map[string]bool // "flag=value" associations
+	words map[string]bool // exact and normalized positionals
 }
 
-func (t tokenSet) has(tok string) bool {
-	if strings.HasPrefix(tok, "-") {
-		return t.flags[tok]
+func (t tokenSet) has(req token) bool {
+	if req.flag != "" {
+		if req.hasVal {
+			return t.assoc[req.flag+"="+req.val]
+		}
+		return t.flags[req.flag]
 	}
-	return t.words[tok] || t.words[normalizeKind(tok)]
+	return t.words[req.word] || t.words[normalizeKind(req.word)]
 }
 
+// argTokens indexes args for rule matching. Values of value-taking flags are
+// recorded only as flag=value associations, never as words, so
+// `--field-manager namespace` cannot trip a "delete namespace" rule. Unknown
+// flags are treated as booleans, so whatever follows stays a word
+// (fail-closed). Everything after a bare `--` is positional.
 func argTokens(args []string) tokenSet {
-	t := tokenSet{flags: map[string]bool{}, words: map[string]bool{}}
-	skip := false
-	for _, a := range args {
-		if skip {
-			skip = false
-			continue
-		}
-		if strings.HasPrefix(a, "-") {
-			name, _, _ := strings.Cut(a, "=")
-			t.flags[name] = true
-			if flagsWithValue[a] {
-				skip = true
-			}
-			continue
-		}
+	t := tokenSet{flags: map[string]bool{}, assoc: map[string]bool{}, words: map[string]bool{}}
+	addWord := func(a string) {
 		for _, part := range strings.Split(a, ",") {
 			t.words[part] = true
 			if kind, name, ok := strings.Cut(part, "/"); ok {
@@ -206,6 +244,28 @@ func argTokens(args []string) tokenSet {
 				continue
 			}
 			t.words[normalizeKind(part)] = true
+		}
+	}
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			for _, w := range args[i+1:] {
+				addWord(w)
+			}
+			break
+		}
+		f, ok := FlagAt(args, i)
+		if !ok {
+			addWord(args[i])
+			continue
+		}
+		t.flags[f.Name] = true
+		val, has := f.Val, f.HasVal
+		if f.UsesNext {
+			val, has = args[i+1], true
+			i++
+		}
+		if has {
+			t.assoc[f.Name+"="+val] = true
 		}
 	}
 	return t

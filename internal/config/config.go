@@ -62,6 +62,14 @@ func Load() (*Config, error) {
 		}
 		return nil, err
 	}
+	return Parse(data)
+}
+
+// Parse strictly parses and validates config YAML (unknown keys, malformed
+// YAML and bad ai.* values are errors). Load uses it, and anything that edits
+// the config (e.g. the web config editor) should validate through it so the
+// two can never disagree about what is acceptable.
+func Parse(data []byte) (*Config, error) {
 	var c Config
 	if err := yaml.UnmarshalStrict(data, &c); err != nil {
 		return nil, err
