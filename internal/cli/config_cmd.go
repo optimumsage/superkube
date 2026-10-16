@@ -63,20 +63,41 @@ func newConfigInitCmd() *cobra.Command {
 }
 
 const defaultConfigYAML = `# superkube configuration
-# Most settings can also be overridden via flags or environment variables.
+#
+# The file is parsed strictly: an unknown key or malformed YAML is reported on
+# every run, and guarded commands (delete, apply, scale, rollout, drain,
+# cordon, and any forbid-checked passthrough verb) refuse until it is fixed or
+# moved away. Read-only commands keep working.
+#
+# Flags and environment variables always override these settings.
 
-# AI provider preference. Leave blank to auto-detect (claude > antigravity).
+# AI provider and timeout defaults, used when --ai / --ai-timeout and
+# $SUPERKUBE_AI are not set. Leave unset to auto-detect (claude > antigravity)
+# and use the built-in timeouts (90s, 5m with --tools).
 # ai:
 #   provider: claude        # claude | antigravity
-#   timeout: 90s            # also settable per-run via --ai-timeout
+#   timeout: 90s            # any Go duration: 90s, 2m, ...
 
-# Audit logging. Disable with --audit=off on the command line.
+# Audit logging. Set enabled: false to turn it off; --audit on overrides this
+# for a single run.
 # audit:
 #   enabled: true
 
-# Guardrails. v0.1 honors only --yes overrides; richer policy lands in v0.2.
+# Guardrails applied to every context.
 # guardrails:
-#   require_typed_confirm: true
-#   forbidden_in_contexts:
-#     # - "prod-*"
+#   require_typed_confirm: true   # yes/no confirmations become typed phrases
+
+# Per-context policy. Keys are globs matched against the kubectl context name
+# (* = any characters, ? = one character). Every matching entry applies;
+# the most specific pattern (exact name, then most literal characters)
+# supplies the banner.
+# contexts:
+#   "prod-*":
+#     banner: "PRODUCTION"            # optional banner text
+#     require_typed_confirm: true     # typed phrase for every confirmation
+#     forbid:                         # blocked even with --yes
+#       - "delete --all"              # verb followed by tokens that must all appear
+#       - "delete namespace"          # also matches ns / namespaces / namespace/foo
+#       - "drain"
+#       - "patch"                     # applies to passthrough verbs too
 `

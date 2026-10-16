@@ -51,15 +51,17 @@ func runResourceView(cmd *cobra.Command, args []string, kind string) error {
 	if printHelpIfRequested(cmd, args) {
 		return nil
 	}
-	if len(args) == 0 || firstPositional(args) == "" {
+	args = stripSkFlags(args)
+	if len(positionalArgs(args)) == 0 {
 		return fmt.Errorf("%s view: NAME is required", kind)
 	}
-	runner, err := kubectl.Default()
+	runner, err := kubectl.New()
 	if err != nil {
 		return err
 	}
+	kargs := append([]string{"get", kind}, append(args, "-o", "yaml")...)
 	return runner.Run(cmd.Context(),
-		append([]string{"get", kind}, append(args, "-o", "yaml")...),
+		kubectl.PrependGlobalFlags(kargs, Flags.Context, Flags.Namespace, Flags.Kubeconfig),
 		kubectl.RunOpts{})
 }
 
@@ -71,20 +73,21 @@ func runResourceEdit(cmd *cobra.Command, args []string, kind string) error {
 	if printHelpIfRequested(cmd, args) {
 		return nil
 	}
-	if len(args) == 0 || firstPositional(args) == "" {
+	args = stripSkFlags(args)
+	if len(positionalArgs(args)) == 0 {
 		return fmt.Errorf("%s edit: NAME is required", kind)
 	}
-	if rule, blocked := Policy().IsForbidden("edit", append([]string{kind}, args...)); blocked {
-		return fmt.Errorf("edit refused by policy %q for context matching %q",
-			rule, Policy().MatchedPattern)
+	if err := guardOp("edit", append([]string{kind}, args...)); err != nil {
+		return err
 	}
-	runner, err := kubectl.Default()
+	runner, err := kubectl.New()
 	if err != nil {
 		return err
 	}
 	ReshowBanner()
 	return runner.Run(cmd.Context(),
-		append([]string{"edit", kind}, args...),
+		kubectl.PrependGlobalFlags(append([]string{"edit", kind}, args...),
+			Flags.Context, Flags.Namespace, Flags.Kubeconfig),
 		kubectl.RunOpts{})
 }
 

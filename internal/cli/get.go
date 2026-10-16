@@ -25,6 +25,9 @@ func runGet(cmd *cobra.Command, args []string) error {
 	if printHelpIfRequested(cmd, args) {
 		return nil
 	}
+	// superkube-only flags (--plain, --yes, --audit X, ...) must not reach
+	// kubectl; their effect is already in Flags via the root scan.
+	args = stripSkFlags(args)
 	runner, err := kubectl.Default()
 	if err != nil {
 		return err
