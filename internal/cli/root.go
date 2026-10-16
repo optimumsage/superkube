@@ -531,12 +531,18 @@ func truthy(f guardrail.Flag, val string) bool {
 // The argv is not modified. Best guess only: policy uses scanCandidates.
 func scanGlobalFlags(args []string) scannedFlags {
 	var sf scannedFlags
-	_, verbIdx, hasVerb := firstVerbAt(args)
+	verb, verbIdx, hasVerb := firstVerbAt(args)
+	// sk owns flags after the verb only when the verb is an sk command. After
+	// a passthrough verb (krew plugin, unknown kubectl verb) --audit,
+	// --ai-timeout etc. belong to kubectl/the plugin: neither validated nor
+	// applied, and the original argv is forwarded untouched.
+	owned := !hasVerb || isKnownCommand(NewRootCmd(), verb) || looksLikeResource(verb)
 	for i := 0; i < len(args); {
 		if args[i] == "--" {
 			break
 		}
 		lead := hasVerb && i < verbIdx
+		skOwns := lead || owned
 		fs, n, ok := parseTok(args, i, lead)
 		if !ok {
 			i++
@@ -555,6 +561,9 @@ func scanGlobalFlags(args []string) scannedFlags {
 			case "namespace":
 				sf.Namespace = val
 			case "audit":
+				if !skOwns {
+					break
+				}
 				// Values are validated: a value-less `--audit --yes` must not
 				// silently swallow the confirmation flag.
 				if val != "on" && val != "off" {
@@ -571,6 +580,9 @@ func scanGlobalFlags(args []string) scannedFlags {
 					sf.AI = val
 				}
 			case "ai-timeout":
+				if !skOwns {
+					break
+				}
 				d, err := time.ParseDuration(val)
 				if err != nil || d <= 0 {
 					sf.fail(fmt.Errorf("invalid --ai-timeout value %q (want a duration such as 90s)", val))
@@ -667,7 +679,6 @@ func leadAmbiguity(root *cobra.Command, args []string, verbIdx int, hasVerb bool
 	}
 	return nil
 }
-
 
 // childByName finds a direct subcommand by name or alias.
 func childByName(cmd *cobra.Command, name string) *cobra.Command {
