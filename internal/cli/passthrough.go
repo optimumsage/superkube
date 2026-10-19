@@ -20,7 +20,9 @@ import (
 // cause kubectl to error, which is the correct UX: the user sees that the verb
 // isn't a known superkube command and the flags don't apply.
 func runPassthrough(ctx context.Context, argv []string) int {
-	runner, err := kubectl.Default()
+	// kubectl.New (not the Default singleton): it re-reads $KUBECTL each time,
+	// which is what lets the in-process tests point at a fake kubectl.
+	runner, err := kubectl.New()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "superkube:", err)
 		return 127

@@ -25,6 +25,9 @@ func runGet(cmd *cobra.Command, args []string) error {
 	if printHelpIfRequested(cmd, args) {
 		return nil
 	}
+	// superkube-only flags (--plain, --yes, --audit X, ...) must not reach
+	// kubectl; their effect is already in Flags via the root scan.
+	args = stripSkFlags(args)
 	runner, err := kubectl.Default()
 	if err != nil {
 		return err
@@ -34,8 +37,12 @@ func runGet(cmd *cobra.Command, args []string) error {
 	// Watch mode on a TTY with a default/wide table → render a live-updating
 	// frame via client-go. Non-TTY watches still passthrough below so pipes
 	// stay byte-for-byte identical for grep/awk/jq users.
+	// Argv shapes the live table can't express (multiple kinds, --show-labels,
+	// -o json, …) fall through to the verbatim kubectl passthrough below.
 	if (hasFlag(args, "-w") || hasFlag(args, "--watch")) && ui.Styled() && !hasNonTableOutput(args) {
-		return runGetWatch(cmd, args)
+		if wopts, ok := parseWatchArgs(args); ok {
+			return runGetWatch(cmd, args, wopts)
+		}
 	}
 
 	// Passthrough cases:

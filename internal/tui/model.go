@@ -2,16 +2,19 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
-
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/optimumsage/superkube/internal/kube"
 )
 
 // ProducerFn streams the output of a TUI action into w. ns/name identify the
@@ -44,12 +47,23 @@ type Options struct {
 // Run is the entrypoint called from internal/cli/tui.go.
 func Run(ctx context.Context, opts Options) error {
 	state := NewState()
-	if _, err := StartInformers(ctx, opts.Clientset, opts.Namespace, state); err != nil {
+	// client-go logs through klog straight to stderr, which would paint over
+	// the alt-screen. Failures surface in the status bar instead.
+	restoreLogs := kube.QuietClientLogs()
+	stopInformers, err := StartInformers(ctx, opts.Clientset, opts.Namespace, state)
+	if err != nil {
+		restoreLogs()
 		return fmt.Errorf("start informers: %w", err)
 	}
+	// Order matters: stop (and wait for) the informers first, then restore
+	// klog, so teardown errors can't print over the restored terminal.
+	defer func() {
+		stopInformers()
+		restoreLogs()
+	}()
 	m := newModel(ctx, state, opts)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
-	_, err := p.Run()
+	_, err = p.Run()
 	return err
 }
 
@@ -143,30 +157,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// Pane messages carry the ID of the pane that produced them; anything from
+	// a pane the user has since closed (or replaced) is dropped so it cannot
+	// land in the new one.
 	case logLineMsg:
-		if m.logs != nil {
+		if m.logs != nil && msg.id == m.logs.id {
 			m.logs.append(msg.line)
 			return m, m.logs.waitLine()
 		}
 		return m, nil
 
 	case logEndMsg:
-		if m.logs != nil && msg.err != nil && msg.err != context.Canceled {
+		if m.logs != nil && msg.id == m.logs.id && msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 			m.logs.errMsg = msg.err.Error()
 		}
 		return m, nil
 
 	case textChunkMsg:
-		if m.text != nil {
+		if m.text != nil && msg.id == m.text.id {
 			m.text.appendChunk(msg.s)
 			return m, m.text.waitChunk()
 		}
 		return m, nil
 
 	case textEndMsg:
-		if m.text != nil {
+		if m.text != nil && msg.id == m.text.id {
 			m.text.done = true
-			if msg.err != nil && msg.err != context.Canceled {
+			if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 				m.text.err = msg.err
 			}
 		}
@@ -325,8 +342,6 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.action = &actionMenu{row: row, kind: m.currentKind}
 			m.deleteInput = ""
 		}
-	case "e_pod":
-		// Kept for future use — pods are not edited in the TUI directly today.
 	}
 	m.clampCursor()
 	return m, nil
@@ -345,7 +360,7 @@ func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 	case tea.KeyBackspace:
 		if len(m.filter) > 0 {
-			m.filter = m.filter[:len(m.filter)-1]
+			m.filter = dropLastRune(m.filter)
 			m.applyFilter()
 			// Always reset the cursor and viewport when the filter narrows —
 			// the user expects to see the top of the new result set.
@@ -452,7 +467,7 @@ func (m Model) handleDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyBackspace:
 		if len(m.deleteInput) > 0 {
-			m.deleteInput = m.deleteInput[:len(m.deleteInput)-1]
+			m.deleteInput = dropLastRune(m.deleteInput)
 		}
 		return m, nil
 	case tea.KeyRunes:
@@ -554,7 +569,7 @@ func (m Model) handleLogFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.logs.offset = 0
 	case tea.KeyBackspace:
 		if len(m.logs.filter) > 0 {
-			m.logs.filter = m.logs.filter[:len(m.logs.filter)-1]
+			m.logs.filter = dropLastRune(m.logs.filter)
 			m.logs.offset = 0
 		}
 	case tea.KeyRunes:
@@ -678,7 +693,7 @@ func (m Model) handleTextFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.text.offset = 0
 	case tea.KeyBackspace:
 		if len(m.text.filter) > 0 {
-			m.text.filter = m.text.filter[:len(m.text.filter)-1]
+			m.text.filter = dropLastRune(m.text.filter)
 			m.text.offset = 0
 		}
 	case tea.KeyRunes:
@@ -820,4 +835,11 @@ func (m Model) logViewHeight() int {
 		return 2
 	}
 	return m.h - chromeRows - 2
+}
+
+// dropLastRune removes the final rune of s. Backspace must not slice bytes:
+// cutting a multi-byte rune in half leaves invalid UTF-8 in the filter.
+func dropLastRune(s string) string {
+	_, size := utf8.DecodeLastRuneInString(s)
+	return s[:len(s)-size]
 }

@@ -14,13 +14,14 @@ import (
 )
 
 // newUpgradeCmd wires `sk upgrade`. The feature mirrors scripts/install.sh:
-// download the latest release tarball, verify its checksum when available,
-// and atomically replace the running binary. Confirmation is mandatory in
+// download the latest release tarball, verify its checksum (required unless
+// --skip-checksum), and atomically replace the running binary. Confirmation is mandatory in
 // interactive contexts; non-interactive callers must pass --yes.
 func newUpgradeCmd() *cobra.Command {
 	var (
 		check         bool
 		force         bool
+		skipChecksum  bool
 		targetVersion string
 	)
 	c := &cobra.Command{
@@ -33,7 +34,8 @@ Examples:
   sk upgrade --check          # just report whether an upgrade is available
   sk upgrade --version v0.2.1 # install a specific version
   sk upgrade --yes            # skip the confirmation prompt
-  sk upgrade --force          # reinstall even if already up to date`,
+  sk upgrade --force          # reinstall even if already up to date
+  sk upgrade --skip-checksum  # UNSAFE: allow a release that publishes no checksums`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
@@ -43,6 +45,7 @@ Examples:
 				CurrentVersion: version.Version,
 				TargetVersion:  targetVersion,
 				Force:          force,
+				SkipChecksum:   skipChecksum,
 			}
 
 			plan, err := upgrade.CheckLatest(ctx, opt)
@@ -86,6 +89,7 @@ Examples:
 	}
 	c.Flags().BoolVar(&check, "check", false, "only check whether an upgrade is available")
 	c.Flags().BoolVar(&force, "force", false, "reinstall even if already up to date")
+	c.Flags().BoolVar(&skipChecksum, "skip-checksum", false, "UNSAFE: install even if checksums.txt (or the asset's entry) is missing; a mismatching checksum still aborts")
 	c.Flags().StringVar(&targetVersion, "version", "", "install a specific version (e.g. v0.2.1)")
 	return c
 }

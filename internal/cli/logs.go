@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -166,11 +167,16 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 		}
 	}
 
+	allContainers, err := strictBoolFlag(args, "--all-containers")
+	if err != nil {
+		return err
+	}
 	opts := kube.MultiLogOpts{
-		Namespace: effectiveNamespace(args),
-		Container: container,
-		TailLines: tail,
-		Follow:    follow,
+		Namespace:     effectiveNamespace(args),
+		Container:     container,
+		AllContainers: allContainers,
+		TailLines:     tail,
+		Follow:        follow,
 	}
 	// Distinguish workload-shorthand from raw selector by the presence of "/".
 	if strings.Contains(target, "/") && !strings.Contains(target, "=") {
@@ -188,10 +194,32 @@ func runLogsMulti(cmd *cobra.Command, args []string, target string) error {
 	var out io.Writer = os.Stdout
 	if ui.Styled() {
 		lc := newLineColorizer(os.Stdout)
-		defer lc.Flush()
+		defer func() { _ = lc.Flush() }() // best-effort: stdout is the only sink
 		out = lc
 	}
 	return loader.TailMulti(cmd.Context(), opts, out, prefixer)
+}
+
+// strictBoolFlag parses a kubectl-style boolean flag from args: absent is false, a
+// bare `--name` is true, and `--name=VALUE` must parse via strconv.ParseBool.
+// Like pflag, the last occurrence wins, and every occurrence is validated so a
+// typo earlier on the line isn't silently overridden.
+func strictBoolFlag(args []string, name string) (bool, error) {
+	result := false
+	for _, a := range args {
+		if a == name {
+			result = true
+			continue
+		}
+		if v, ok := strings.CutPrefix(a, name+"="); ok {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return false, fmt.Errorf("invalid value %q for %s", v, name)
+			}
+			result = b
+		}
+	}
+	return result, nil
 }
 
 // podPrefixer returns a LinePrefixer that colorizes the [pod-name] tag with a
@@ -228,7 +256,12 @@ Modes:
   --multi=TARGET Stream logs from many pods at once, prefixed and colored
                  per pod. TARGET is either a workload (deploy/web,
                  statefulset/db, daemonset/log, replicaset/x) or a raw
-                 label selector (app=web,tier=frontend). Supports -f.
+                 label selector (app=web,tier=frontend). Supports -f
+                 (which also picks up pods created later, e.g. during a
+                 rollout), -c CONTAINER and --all-containers. Pods with
+                 several containers stream their default container (the
+                 kubectl.kubernetes.io/default-container annotation, else
+                 the first).
 
 Examples:
   sk logs my-pod                       # plain

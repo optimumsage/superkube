@@ -17,6 +17,13 @@ linters:
     - unconvert
     - unparam
   settings:
+    errcheck:
+      # Writes to the user's terminal/stdout have no useful recovery path;
+      # everything else (closes, file writes, kubectl runs) stays checked.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
     revive:
       rules:
         - name: var-naming

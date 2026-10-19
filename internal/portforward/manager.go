@@ -57,7 +57,7 @@ func Start(opts StartOpts) (Entry, error) {
 	}
 	// We pass logFile to the child and close our handle after Start; the OS
 	// keeps the fd alive in the child.
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	args := buildKubectlArgs(opts)
 	cmd := exec.Command(kubectlPath, args...)
@@ -72,6 +72,8 @@ func Start(opts StartOpts) (Entry, error) {
 	if err := cmd.Start(); err != nil {
 		return Entry{}, fmt.Errorf("start kubectl port-forward: %w", err)
 	}
+	// Capture the PID first: Release() resets Process.Pid to -1.
+	pid := cmd.Process.Pid
 	// Release so we don't hold a zombie reference. Liveness will be polled
 	// from the state file later.
 	if err := cmd.Process.Release(); err != nil {
@@ -85,10 +87,15 @@ func Start(opts StartOpts) (Entry, error) {
 		Ports:      opts.Ports,
 		Namespace:  opts.Namespace,
 		Context:    opts.Context,
-		PID:        cmd.Process.Pid,
+		PID:        pid,
 		StartedAt:  time.Now().UTC(),
 		LogPath:    logPath,
 		Kubeconfig: opts.Kubeconfig,
+	}
+
+	// Best-effort: lets identify() detect PID reuse later.
+	if st, err := processStartTime(entry.PID); err == nil {
+		entry.ProcStart = st
 	}
 
 	// Give kubectl a brief moment to fail fast (auth error, bad target). If
@@ -107,19 +114,6 @@ func Start(opts StartOpts) (Entry, error) {
 		return Entry{}, err
 	}
 	return entry, nil
-}
-
-// Stop terminates the entries with the given id ("all" matches everything),
-// removes them from the state file, and returns the entries it stopped.
-func Stop(id string) ([]Entry, error) {
-	removed, err := Remove(id)
-	if err != nil {
-		return removed, err
-	}
-	for _, e := range removed {
-		_ = Kill(e.PID)
-	}
-	return removed, nil
 }
 
 // Kill sends SIGTERM, then SIGKILL after a brief grace window. Best-effort:
@@ -144,7 +138,20 @@ func Kill(pid int) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return proc.Signal(syscall.SIGKILL)
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		return err
+	}
+	// SIGKILL is asynchronous: give the kernel a moment to tear the process
+	// down so callers that re-check liveness don't report a successful kill
+	// as "still running".
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !isAlive(pid) {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil
 }
 
 // buildKubectlArgs assembles the argv we hand to `kubectl port-forward`. We

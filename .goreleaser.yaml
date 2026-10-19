@@ -4,7 +4,8 @@ project_name: superkube
 
 before:
   hooks:
-    - go mod tidy
+    # Verify, don't mutate: a tidy that rewrites go.mod would dirty the tree mid-release.
+    - go mod verify
 
 builds:
   - id: superkube
@@ -34,11 +35,7 @@ archives:
       - README.md
       - src: scripts/sk-install-symlink
         strip_parent: true
-    format_overrides:
-      - goos: linux
-        format: tar.gz
-      - goos: darwin
-        format: tar.gz
+    formats: [tar.gz]
 
 checksum:
   name_template: "checksums.txt"

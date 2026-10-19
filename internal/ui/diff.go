@@ -23,21 +23,21 @@ func PrintUnifiedDiff(w io.Writer, a, b, fromFile, toFile string) error {
 		return fmt.Errorf("render diff: %w", err)
 	}
 	if !Styled() {
-		fmt.Fprint(w, diff)
+		_, _ = fmt.Fprint(w, diff)
 		return nil
 	}
 	for _, line := range strings.SplitAfter(diff, "\n") {
 		switch {
 		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
-			fmt.Fprint(w, Render(Title, line))
+			_, _ = fmt.Fprint(w, Render(Title, line))
 		case strings.HasPrefix(line, "@@"):
-			fmt.Fprint(w, Render(Info, line))
+			_, _ = fmt.Fprint(w, Render(Info, line))
 		case strings.HasPrefix(line, "+"):
-			fmt.Fprint(w, Render(Success, line))
+			_, _ = fmt.Fprint(w, Render(Success, line))
 		case strings.HasPrefix(line, "-"):
-			fmt.Fprint(w, Render(Danger, line))
+			_, _ = fmt.Fprint(w, Render(Danger, line))
 		default:
-			fmt.Fprint(w, line)
+			_, _ = fmt.Fprint(w, line)
 		}
 	}
 	return nil

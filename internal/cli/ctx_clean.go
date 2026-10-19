@@ -86,7 +86,7 @@ func runCtxClean(cmd *cobra.Command, f *ctxCleanFlags) error {
 
 	var toRemove []string
 	if f.auto {
-		toRemove, err = autoSelectContexts(cmd.Context(), out, loader, contexts, current, f)
+		toRemove = autoSelectContexts(cmd.Context(), out, loader, contexts, current, f)
 	} else {
 		toRemove, err = manualSelectContexts(contexts, current)
 	}
@@ -123,7 +123,7 @@ func runCtxClean(cmd *cobra.Command, f *ctxCleanFlags) error {
 	removed, failed := 0, 0
 	for _, name := range toRemove {
 		if err := loader.DeleteContext(name, !f.keepOrphans); err != nil {
-			fmt.Fprintln(errOut, ui.Render(ui.Danger, "  ✗ "+name+": "+err.Error()))
+			fmt.Fprintln(errOut, ui.RenderTo(errOut, ui.Danger, "  ✗ "+name+": "+err.Error()))
 			failed++
 			continue
 		}
@@ -174,7 +174,7 @@ func manualSelectContexts(contexts []string, current string) ([]string, error) {
 	return selected, nil
 }
 
-func autoSelectContexts(ctx context.Context, out io.Writer, loader kube.Loader, contexts []string, current string, f *ctxCleanFlags) ([]string, error) {
+func autoSelectContexts(ctx context.Context, out io.Writer, loader kube.Loader, contexts []string, current string, f *ctxCleanFlags) []string {
 	concurrency := f.concurrency
 	if concurrency < 1 {
 		concurrency = 1
@@ -213,7 +213,7 @@ func autoSelectContexts(ctx context.Context, out io.Writer, loader kube.Loader, 
 		bad = append(bad, r.Context)
 	}
 	sort.Strings(bad)
-	return bad, nil
+	return bad
 }
 
 // briefErr trims a network error message down to its essence so the probe

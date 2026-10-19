@@ -14,8 +14,16 @@ func setupTmpState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", tmp)
 }
 
-func TestAddLoadRemove(t *testing.T) {
+// setupTmpStateAsForwards is setupTmpState plus the fake process-identity
+// check, for tests that use os.Getpid() as a live forward.
+func setupTmpStateAsForwards(t *testing.T) {
+	t.Helper()
 	setupTmpState(t)
+	fakeForwardCommand(t)
+}
+
+func TestAddLoadRemove(t *testing.T) {
+	setupTmpStateAsForwards(t)
 
 	e1 := Entry{
 		ID:        "pf-aaa",
@@ -70,7 +78,7 @@ func TestAddLoadRemove(t *testing.T) {
 }
 
 func TestRemoveAll(t *testing.T) {
-	setupTmpState(t)
+	setupTmpStateAsForwards(t)
 	for _, id := range []string{"pf-1", "pf-2", "pf-3"} {
 		_ = Add(Entry{ID: id, PID: os.Getpid(), StartedAt: time.Now(), Target: "x", Ports: []string{"80:80"}})
 	}
@@ -88,7 +96,7 @@ func TestRemoveAll(t *testing.T) {
 }
 
 func TestPrunesDeadPIDs(t *testing.T) {
-	setupTmpState(t)
+	setupTmpStateAsForwards(t)
 	// Write a state file by hand with a guaranteed-dead PID. Linux/macOS both
 	// reserve PID 1 (init); a very high PID is far less likely to be live.
 	dead := Entry{
@@ -121,7 +129,7 @@ func TestPrunesDeadPIDs(t *testing.T) {
 }
 
 func TestFindByID(t *testing.T) {
-	setupTmpState(t)
+	setupTmpStateAsForwards(t)
 	e := Entry{ID: "pf-find", PID: os.Getpid(), StartedAt: time.Now(), Target: "svc/x", Ports: []string{"1:1"}}
 	_ = Add(e)
 	got, ok, err := FindByID("pf-find")

@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/optimumsage/superkube/internal/guardrail"
 	"github.com/optimumsage/superkube/internal/kubectl"
 )
 
@@ -27,30 +26,31 @@ func runScale(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return errors.New("scale: --replicas=N and TYPE/NAME required")
 	}
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	kubectlArgs := stripFlag(args, "--yes")
-	kubectlArgs = stripFlag(kubectlArgs, "-y")
+	yes := Flags.Yes || boolFlag(args, "yes")
+	kubectlArgs := stripSkFlags(args)
+
+	if err := guardOp("scale", args); err != nil {
+		return err
+	}
 
 	replicas, ok := flagValue(kubectlArgs, "--replicas")
 	if !ok {
 		return errors.New("scale: --replicas=N is required")
 	}
-	if replicas == "0" {
+	if replicas == "0" && !isDryRunArgs(kubectlArgs) {
 		target := strings.Join(positionalArgs(kubectlArgs), " ")
 		ReshowBanner()
-		if err := guardrail.YesNo(
+		if err := confirmYesNo(
 			fmt.Sprintf("Scale %s to zero replicas?", target),
 			"This will gracefully terminate all pods of the workload.",
+			"SCALE",
 			yes,
 		); err != nil {
-			if errors.Is(err, guardrail.ErrAborted) {
-				return nil
-			}
 			return err
 		}
 	}
 
-	runner, err := kubectl.Default()
+	runner, err := kubectl.New()
 	if err != nil {
 		return err
 	}

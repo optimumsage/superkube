@@ -96,6 +96,9 @@ func (s *Server) apiResourceForm(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
 	ns := r.PathValue("ns")
 	name := r.PathValue("name")
+	if s.badInput(w, ns, name) {
+		return
+	}
 	if !editableKinds[kind] {
 		s.render.Error(w, http.StatusNotFound, "form not supported for kind "+kind)
 		return
@@ -503,7 +506,7 @@ func parsePortNumber(s string) int32 {
 		if r < '0' || r > '9' {
 			return 0
 		}
-		n = n*10 + int32(r-'0')
+		n = n*10 + (r - '0')
 		if n > 65535 {
 			return 0
 		}

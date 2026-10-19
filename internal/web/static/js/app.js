@@ -426,7 +426,7 @@
       form: null,      // structured form payload (per-kind shape)
       originalYAML: '',
       yaml: '',        // textarea-mode buffer (yaml tab)
-      diff: '', applyOut: '', confirmToken: '',
+      diff: '', applyOut: '', confirmToken: '', confirmExpect: '',
       status: 'loading…', statusDetail: '',
       busy: false,
 
@@ -469,7 +469,9 @@
       async reloadYAML() {
         try {
           let url = '/api/v1/resources/' + this.kind + '/' + this.ns + '/' + this.name + '/yaml';
-          if (this.isSecret && this.reveal) url += '?reveal=1';
+          // The editable buffer needs the raw manifest: the plain endpoint is
+          // masked for viewing and masked placeholders must never be submitted.
+          if (this.isSecret) url += this.reveal ? '?reveal=1' : '?edit=1';
           const r = await fetch(url);
           this.yaml = await r.text();
         } catch (e) {
@@ -504,6 +506,7 @@
           if (d.status === 'no_changes') { this.status = 'no changes'; return; }
           this.diff = d.diff_html || d.diff || '';
           this.confirmToken = d.confirm_token || '';
+          this.confirmExpect = d.expect || '';
           this.status = 'review the diff, then confirm';
         } catch (e) {
           this.status = 'preview failed';
@@ -532,6 +535,7 @@
           if (d.status === 'no_changes') { this.status = 'no changes'; return; }
           this.diff = d.diff_html || d.diff || '';
           this.confirmToken = d.confirm_token || '';
+          this.confirmExpect = d.expect || '';
           this.status = 'review the diff, then confirm';
         } catch (e) {
           this.status = 'preview failed';
@@ -546,10 +550,16 @@
       // produced the diff.
       async commit() {
         if (!this.confirmToken) return;
+        // require_typed_confirm: the server sends the resource name to type.
+        let typed = '';
+        if (this.confirmExpect) {
+          typed = window.prompt('Type ' + this.confirmExpect + ' to confirm the edit', '');
+          if (typed == null) return;
+        }
         this.busy = true; this.applyOut = ''; this.statusDetail = '';
         const body = (this.tab === 'form')
-          ? { form: this.form, original_yaml: this.originalYAML, confirm_token: this.confirmToken }
-          : { yaml: this.yaml, confirm_token: this.confirmToken };
+          ? { form: this.form, original_yaml: this.originalYAML, confirm_token: this.confirmToken, confirm_value: typed }
+          : { yaml: this.yaml, confirm_token: this.confirmToken, confirm_value: typed };
         try {
           const r = await fetch('/api/v1/resources/' + this.kind + '/' + this.ns + '/' + this.name + '/edit/commit', {
             method: 'POST',
@@ -565,7 +575,10 @@
             setTimeout(() => this.reload(), 200);
           } else {
             this.status = 'apply failed';
-            this.statusDetail = d.error || '';
+            this.statusDetail = d.error || d.forbid_reason || ('HTTP ' + r.status);
+            // The token is single-use and burned once consumed (410 expired,
+            // 502 apply error): force a fresh preview.
+            if (r.status !== 400 && r.status !== 403) { this.confirmToken = ''; this.confirmExpect = ''; }
           }
         } catch (e) {
           this.status = 'apply failed';
@@ -688,32 +701,49 @@
 
   window.ApplyPage = function () {
     return {
-      yaml: '', diff: '', status: '', applyOut: '', confirmToken: '', busy: false,
+      yaml: '', diff: '', status: '', applyOut: '', confirmToken: '', confirmExpect: '', busy: false,
       init() {},
       async preview() {
         if (!this.yaml.trim()) { this.status = 'paste a manifest first'; return; }
-        this.busy = true; this.status = 'computing diff…'; this.diff = ''; this.applyOut = '';
+        this.busy = true; this.status = 'computing diff…'; this.diff = ''; this.applyOut = ''; this.confirmToken = ''; this.confirmExpect = '';
         try {
           const r = await fetch('/api/v1/apply/preview', { method: 'POST', headers: csrfHeaders(), body: JSON.stringify({ yaml: this.yaml }) });
           const d = await r.json();
+          if (!r.ok) {
+            this.status = 'preview failed: ' + (d.error || d.forbid_reason || ('HTTP ' + r.status));
+            return;
+          }
           if (d.status === 'no_changes') { this.status = 'no differences (cluster matches manifest)'; return; }
           this.diff = d.diff_html || '';
           this.confirmToken = d.confirm_token || '';
+          this.confirmExpect = d.expect || '';
           this.status = 'review the diff above, then confirm';
         } catch (e) { this.status = 'preview failed: ' + e; }
         finally { this.busy = false; }
       },
       async commit() {
+        let typed = '';
+        if (this.confirmExpect) {
+          typed = window.prompt('Type ' + this.confirmExpect + ' to confirm the apply', '');
+          if (typed == null) return;
+        }
         this.busy = true; this.applyOut = '';
         try {
-          const r = await fetch('/api/v1/apply/commit', { method: 'POST', headers: csrfHeaders(), body: JSON.stringify({ yaml: this.yaml, confirm_token: this.confirmToken }) });
+          const r = await fetch('/api/v1/apply/commit', { method: 'POST', headers: csrfHeaders(), body: JSON.stringify({ yaml: this.yaml, confirm_token: this.confirmToken, confirm_value: typed }) });
           const d = await r.json();
           this.applyOut = d.output || '';
-          this.status = d.status === 'applied' ? 'applied' : 'apply failed';
+          if (r.ok && d.status === 'applied') {
+            this.status = 'applied';
+            this.confirmToken = ''; this.confirmExpect = '';
+          } else {
+            this.status = 'apply failed: ' + (d.error || d.forbid_reason || ('HTTP ' + r.status));
+            // Single-use token is burned after a consumed attempt (410/502).
+            if (r.status !== 400 && r.status !== 403) { this.confirmToken = ''; this.confirmExpect = ''; }
+          }
         } catch (e) { this.status = 'apply failed: ' + e; }
         finally { this.busy = false; }
       },
-      reset() { this.diff = ''; this.applyOut = ''; this.confirmToken = ''; this.status = ''; },
+      reset() { this.diff = ''; this.applyOut = ''; this.confirmToken = ''; this.confirmExpect = ''; this.status = ''; },
     };
   };
 
@@ -873,10 +903,12 @@
         }
       },
       async save() {
-        const r = await fetch('/api/v1/config', { method: 'PUT', headers: csrfHeaders(), body: JSON.stringify({ yaml: this.yaml }) });
-        const d = await r.json();
-        this.status = r.ok ? 'saved' : ('error: ' + (d.error || 'unknown'));
-        if (r.ok) Alpine.$data(document.body).toast('Config saved', 'success');
+        // Rewriting config.yaml (guardrail forbid rules!) needs a typed phrase.
+        const d = await window.confirmThen('/api/v1/config', { yaml: this.yaml }, { method: 'PUT' });
+        if (!d) { this.status = 'save cancelled'; return; }
+        const ok = d.status === 'saved';
+        this.status = ok ? 'saved' : ('error: ' + (d.error || 'unknown'));
+        if (ok) Alpine.$data(document.body).toast('Config saved', 'success');
       },
     };
   };
@@ -1339,7 +1371,7 @@
       term: '', hits: [], picked: null,
       releaseName: '', namespace: 'default',
       createNamespace: false, wait: false, atomic: false,
-      values: '', rendered: '', confirmToken: '',
+      values: '', rendered: '', confirmToken: '', confirmExpect: '',
       status: '', busy: false, result: '',
       goto(p) { gotoPath(p); },
       async search() {
@@ -1385,6 +1417,8 @@
           if (!r.ok) { this.status = 'preview failed: ' + (d.error || ''); return; }
           this.rendered = d.rendered || '';
           this.confirmToken = d.confirm_token || '';
+          // Policy may require typing the release name (require_typed_confirm).
+          this.confirmExpect = d.expect || '';
           this.status = 'review the rendered manifest, then commit';
         } catch (e) {
           this.status = 'preview failed: ' + e;
@@ -1394,6 +1428,11 @@
       },
       async commit() {
         if (!this.confirmToken) return;
+        let typed = '';
+        if (this.confirmExpect) {
+          typed = window.prompt('Type ' + this.confirmExpect + ' to confirm the install', '');
+          if (typed == null) return;
+        }
         this.busy = true; this.status = 'installing…';
         try {
           const r = await fetch('/api/v1/helm/install/commit', {
@@ -1405,6 +1444,7 @@
               create_namespace: this.createNamespace,
               wait: this.wait, atomic: this.atomic,
               confirm_token: this.confirmToken,
+              confirm_value: typed,
             }),
           });
           const d = await r.json();
@@ -1651,10 +1691,10 @@
     const name = rowName(headers, row);
     const ns = rowNs(headers, row);
     if (!name) return;
-    // history is an inspection — POST with yes=true so the server doesn't issue a confirm token.
+    // history is a read-only inspection; the server never asks to confirm it.
     const r = await fetch('/api/v1/destructive/rollout/history', {
       method: 'POST', headers: csrfHeaders(),
-      body: JSON.stringify({ kind, name, namespace: ns, yes: true }),
+      body: JSON.stringify({ kind, name, namespace: ns }),
     });
     const d = await r.json().catch(() => ({}));
     window.alert(d.output || 'No history');
@@ -1754,14 +1794,10 @@
     const name = rowName(headers, row);
     const ns = rowNs(headers, row);
     if (!name) return;
-    const jobName = name + '-manual-' + Math.floor(Date.now() / 1000);
-    const r = await fetch('/api/v1/passthrough', {
-      method: 'POST', headers: csrfHeaders(),
-      body: JSON.stringify({ argv: ['create', 'job', jobName, '--from=cronjob/' + name, '-n', ns] }),
-    });
-    const d = await r.json().catch(() => ({}));
+    const d = await confirmThen('/api/v1/destructive/cronjob/trigger', { name, namespace: ns });
+    if (!d) return;
     const ok = (d.exit_code === 0);
-    Alpine.$data(document.body).toast(ok ? ('Triggered ' + jobName) : ('Trigger failed: ' + ((d.stderr || d.stdout || '')).slice(0, 200)), ok ? 'success' : 'error');
+    Alpine.$data(document.body).toast(ok ? ('Triggered a run of ' + name) : ('Trigger failed: ' + (d.output || d.error || '').slice(0, 200)), ok ? 'success' : 'error');
   }
 
   // Expose for templates that reference them via `kindActions(...)`.

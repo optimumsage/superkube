@@ -39,6 +39,14 @@ type DryRunResult struct {
 // web handler passes a bytes.Buffer). A nil writer is treated as io.Discard
 // so callers that only care about HasChanges don't have to materialize one.
 func PreviewApply(ctx context.Context, runner *kubectl.Runner, kubectlArgs []string, out io.Writer) (DryRunResult, error) {
+	return PreviewApplyStdin(ctx, runner, kubectlArgs, os.Stdin, out)
+}
+
+// PreviewApplyStdin is PreviewApply with an explicit stdin for kubectl diff.
+// `apply -f -` callers must buffer stdin themselves and hand the diff a
+// replayable reader: giving kubectl diff the real os.Stdin consumes it, and
+// the subsequent real apply would receive an empty manifest.
+func PreviewApplyStdin(ctx context.Context, runner *kubectl.Runner, kubectlArgs []string, stdin io.Reader, out io.Writer) (DryRunResult, error) {
 	if out == nil {
 		out = io.Discard
 	}
@@ -48,7 +56,7 @@ func PreviewApply(ctx context.Context, runner *kubectl.Runner, kubectlArgs []str
 	args := append([]string{"diff"}, kubectlArgs...)
 	var stdout, stderr bytes.Buffer
 	err := runner.Run(ctx, args, kubectl.RunOpts{
-		Stdin:  os.Stdin,
+		Stdin:  stdin,
 		Stdout: &stdout,
 		Stderr: &stderr,
 	})
@@ -68,7 +76,7 @@ func PreviewApply(ctx context.Context, runner *kubectl.Runner, kubectlArgs []str
 	default:
 		// Something else went wrong. Surface stderr so the user can act.
 		if stderr.Len() > 0 {
-			io.Copy(out, &stderr)
+			_, _ = io.Copy(out, &stderr)
 		}
 		return DryRunResult{}, fmt.Errorf("kubectl diff failed: %w", err)
 	}

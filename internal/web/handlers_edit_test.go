@@ -1,54 +1,13 @@
 package web
 
 import (
-	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/optimumsage/superkube/internal/guardrail"
 )
-
-func TestRevealSecretYAMLBytes_DecodesValues(t *testing.T) {
-	in := []byte(`apiVersion: v1
-kind: Secret
-metadata:
-  name: creds
-data:
-  username: bW9oc2lu
-  password: c2VjcmV0
-type: Opaque
-`)
-	got := revealSecretYAMLBytes(in)
-	s := string(got)
-	if !strings.Contains(s, "username: mohsin") {
-		t.Errorf("expected decoded username:\n%s", s)
-	}
-	if !strings.Contains(s, "password: secret") {
-		t.Errorf("expected decoded password:\n%s", s)
-	}
-	if bytes.Contains(got, []byte("bW9oc2lu")) {
-		t.Errorf("base64 source leaked through:\n%s", s)
-	}
-	if !strings.Contains(s, "type: Opaque") {
-		t.Errorf("tail of YAML eaten:\n%s", s)
-	}
-}
-
-func TestRevealSecretYAMLBytes_InvalidBase64(t *testing.T) {
-	in := []byte("data:\n  bad: \"@nope@\"\n")
-	got := revealSecretYAMLBytes(in)
-	if !bytes.Contains(got, []byte("<invalid-base64>")) {
-		t.Errorf("expected <invalid-base64> sentinel: %s", got)
-	}
-}
-
-func TestRevealSecretYAMLBytes_NoDataBlockUnchanged(t *testing.T) {
-	in := []byte("apiVersion: v1\nkind: Service\nmetadata:\n  name: x\n")
-	got := revealSecretYAMLBytes(in)
-	if !bytes.Equal(got, in) {
-		t.Errorf("input without data block was modified: %q", got)
-	}
-}
 
 func TestIsSecretKind(t *testing.T) {
 	cases := map[string]bool{
@@ -118,7 +77,7 @@ func TestEditCommit_RejectsBadToken(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/resources/configmaps/default/foo/edit/commit",
-		strings.NewReader(`{"yaml":"x","confirm_token":"nope"}`))
+		strings.NewReader(`{"yaml":`+quote(cmYAML)+`,"confirm_token":"nope"}`))
 	req.Host = "127.0.0.1"
 	req.SetPathValue("kind", "configmaps")
 	req.SetPathValue("ns", "default")
@@ -174,5 +133,48 @@ func TestEditPreview_RejectsEmptyYAML(t *testing.T) {
 	s.apiResourceEditPreview(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for empty yaml", rr.Code)
+	}
+}
+
+func TestEditRejectsCommentedAndCRLFSeparators(t *testing.T) {
+	ok := func(y string) error { return validateEditYAML("cm", "default", "app", y) }
+	if err := ok(cmYAML); err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	second := strings.Replace(cmYAML, "name: app", "name: other", 1)
+	for name, y := range map[string]string{
+		"commented sep": cmYAML + "--- # second object\n" + second,
+		"crlf sep":      strings.ReplaceAll(cmYAML+"---\n"+second, "\n", "\r\n"),
+		"crlf comment":  strings.ReplaceAll(cmYAML+"--- # x\n"+second, "\n", "\r\n"),
+		"leading sep":   "---\n" + cmYAML + "---\n" + second,
+	} {
+		if ok(y) == nil {
+			t.Errorf("%s: accepted two documents", name)
+		}
+	}
+	if err := ok("---\n" + cmYAML + "---\n# only a comment\n"); err != nil {
+		t.Errorf("trailing empty document should be fine: %v", err)
+	}
+}
+
+func TestApplyForbidConsidersEveryDocument(t *testing.T) {
+	pol := func(string) (guardrail.Policy, error) {
+		return guardrail.Policy{Forbidden: []string{"apply secret", "apply -n kube-system"}}, nil
+	}
+	e := newHardenEnv(t, hardenOpts{policy: pol})
+	cm := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n"
+	sec := "apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\n"
+	ks := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: b\n  namespace: kube-system\n"
+	for name, y := range map[string]string{
+		"secret second": cm + "--- # more\n" + sec,
+		"ns second":     cm + "---\n" + ks,
+	} {
+		rr := e.do(t, "/api/v1/apply/preview", mustJSONStr(map[string]string{"yaml": y}))
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("%s: code %d, want 403", name, rr.Code)
+		}
+	}
+	if len(e.calls()) != 0 {
+		t.Fatalf("kubectl ran: %v", e.calls())
 	}
 }

@@ -26,13 +26,11 @@ func runDrain(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return errors.New("drain: NODE name required")
 	}
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	kubectlArgs := stripFlag(args, "--yes")
-	kubectlArgs = stripFlag(kubectlArgs, "-y")
+	yes := Flags.Yes || boolFlag(args, "yes")
+	kubectlArgs := stripSkFlags(args)
 
-	if rule, blocked := Policy().IsForbidden("drain", args); blocked {
-		return fmt.Errorf("drain refused by policy %q for context matching %q",
-			rule, Policy().MatchedPattern)
+	if err := guardOp("drain", args); err != nil {
+		return err
 	}
 
 	positionals := positionalArgs(kubectlArgs)
@@ -44,12 +42,12 @@ func runDrain(cmd *cobra.Command, args []string) error {
 	if err := guardrail.TypedName(
 		fmt.Sprintf("drain node %s (this will evict its pods)", node),
 		node,
-		yes,
+		yes || isDryRunArgs(kubectlArgs),
 	); err != nil {
 		return err
 	}
 
-	runner, err := kubectl.Default()
+	runner, err := kubectl.New()
 	if err != nil {
 		return err
 	}
@@ -72,27 +70,29 @@ func runCordon(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return errors.New("cordon: NODE name required")
 	}
-	yes := Flags.Yes || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	kubectlArgs := stripFlag(args, "--yes")
-	kubectlArgs = stripFlag(kubectlArgs, "-y")
+	yes := Flags.Yes || boolFlag(args, "yes")
+	kubectlArgs := stripSkFlags(args)
+
+	if err := guardOp("cordon", args); err != nil {
+		return err
+	}
 
 	positionals := positionalArgs(kubectlArgs)
 	if len(positionals) == 0 {
 		return errors.New("cordon: NODE name required")
 	}
 	node := positionals[0]
-	if err := guardrail.YesNo(
+	ReshowBanner()
+	if err := confirmYesNo(
 		fmt.Sprintf("Cordon node %s? (new pods will not be scheduled here)", node),
 		"Use `sk uncordon` to reverse. Existing pods are unaffected.",
-		yes,
+		"CORDON",
+		yes || isDryRunArgs(kubectlArgs),
 	); err != nil {
-		if errors.Is(err, guardrail.ErrAborted) {
-			return nil
-		}
 		return err
 	}
 
-	runner, err := kubectl.Default()
+	runner, err := kubectl.New()
 	if err != nil {
 		return err
 	}

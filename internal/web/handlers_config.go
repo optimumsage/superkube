@@ -1,10 +1,12 @@
 package web
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"os"
+	"reflect"
+	"sort"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 
@@ -26,22 +28,86 @@ func (s *Server) apiConfigGet(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// apiConfigPut writes new YAML to disk after validating it parses into our
-// Config schema. Invalid YAML is rejected without touching the file.
+// parseConfig validates config.yaml text exactly as the CLI loads it (strict
+// keys and types plus semantic validation), so the browser can never save a
+// file that would make every guarded CLI command fail closed.
+func parseConfig(data []byte) error {
+	_, err := config.Parse(data)
+	return err
+}
+
+// configChangeSummary names the top-level keys whose value differs between the
+// old and new document, e.g. "changed: contexts,guardrails".
+func configChangeSummary(oldData, newData []byte) string {
+	var o, n map[string]any
+	_ = yaml.Unmarshal(oldData, &o)
+	_ = yaml.Unmarshal(newData, &n)
+	seen := map[string]bool{}
+	var keys []string
+	for k := range o {
+		seen[k] = true
+	}
+	for k := range n {
+		seen[k] = true
+	}
+	for k := range seen {
+		if !reflect.DeepEqual(o[k], n[k]) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return "changed: (formatting only)"
+	}
+	return "changed: " + strings.Join(keys, ",")
+}
+
+// configEditPhrase is what the user must type to save config.yaml from the
+// browser. The config holds the guardrail `forbid` rules, so rewriting it is
+// the most sensitive operation the web UI offers.
+const configEditPhrase = "EDIT CONFIG"
+
+// apiConfigPut writes new YAML to disk after strict validation and a typed
+// confirmation (server-side --yes cannot skip it). It deliberately does not go
+// through gateConfirm: that consults the current policy, and a config.yaml that
+// no longer parses must still be repairable from here.
 func (s *Server) apiConfigPut(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		YAML string `json:"yaml"`
+		YAML         string `json:"yaml"`
+		ConfirmToken string `json:"confirm_token"`
+		ConfirmValue string `json:"confirm_value"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := s.decodeJSON(w, r, &body); err != nil {
 		s.render.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	var probe config.Config
-	if err := yaml.Unmarshal([]byte(body.YAML), &probe); err != nil {
-		s.render.Error(w, http.StatusBadRequest, "yaml does not parse: "+err.Error())
+	if err := parseConfig([]byte(body.YAML)); err != nil {
+		s.render.Error(w, http.StatusBadRequest, "config is not valid: "+err.Error())
+		return
+	}
+	sess := s.readSession(r)
+	digest := digestOf("config-edit", body.YAML)
+	if body.ConfirmToken == "" {
+		bannerText, bannerKind := s.bannerFor(sess)
+		tok := s.pty.Issue(ptyConfirmEntry{
+			Verb: "config-edit", Context: sess.Context, Resource: "config.yaml",
+			Expect: configEditPhrase, Digest: digest,
+		})
+		s.render.JSON(w, http.StatusOK, confirmationResponse{
+			Status: "needs_confirmation", Style: "typed_phrase",
+			Prompt: "Type " + configEditPhrase + " to rewrite config.yaml",
+			Detail: "This file holds guardrail forbid rules; saving applies to the next operation.",
+			Expect: configEditPhrase, Token: tok, TTLSeconds: 30,
+			BannerText: bannerText, BannerKind: bannerKind,
+		})
+		return
+	}
+	if _, ok := s.pty.Consume(body.ConfirmToken, body.ConfirmValue, "config-edit", sess.Context, digest); !ok {
+		s.render.Error(w, http.StatusGone, "confirmation expired or did not match")
 		return
 	}
 	path := config.ConfigFile()
+	oldData, _ := os.ReadFile(path)
 	if err := os.MkdirAll(dirOf(path), 0o700); err != nil {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
 		return
@@ -50,7 +116,7 @@ func (s *Server) apiConfigPut(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordWebAudit("config-put", []string{path}, 0, 0)
+	s.recordWebAudit(r, "config-edit", []string{path, configChangeSummary(oldData, []byte(body.YAML))}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
@@ -59,9 +125,41 @@ func (s *Server) apiConfigPut(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiConfigInit(w http.ResponseWriter, r *http.Request) {
 	path := config.ConfigFile()
 	force := r.URL.Query().Get("force") == "1"
-	if _, err := os.Stat(path); err == nil && !force {
-		s.render.Error(w, http.StatusConflict, "config already exists; pass force=1 to overwrite")
-		return
+	if _, err := os.Stat(path); err == nil {
+		if !force {
+			s.render.Error(w, http.StatusConflict, "config already exists; pass force=1 to overwrite")
+			return
+		}
+		// Overwriting wipes the guardrail forbid rules: same typed
+		// confirmation as a PUT.
+		var body struct {
+			ConfirmToken string `json:"confirm_token"`
+			ConfirmValue string `json:"confirm_value"`
+		}
+		if r.ContentLength != 0 {
+			_ = s.decodeJSON(w, r, &body)
+		}
+		sess := s.readSession(r)
+		digest := digestOf("config-init", path)
+		if body.ConfirmToken == "" {
+			bannerText, bannerKind := s.bannerFor(sess)
+			tok := s.pty.Issue(ptyConfirmEntry{
+				Verb: "config-init", Context: sess.Context, Resource: "config.yaml",
+				Expect: configEditPhrase, Digest: digest,
+			})
+			s.render.JSON(w, http.StatusOK, confirmationResponse{
+				Status: "needs_confirmation", Style: "typed_phrase",
+				Prompt: "Type " + configEditPhrase + " to overwrite config.yaml with the defaults",
+				Detail: "This discards every existing forbid rule.",
+				Expect: configEditPhrase, Token: tok, TTLSeconds: 30,
+				BannerText: bannerText, BannerKind: bannerKind,
+			})
+			return
+		}
+		if _, ok := s.pty.Consume(body.ConfirmToken, body.ConfirmValue, "config-init", sess.Context, digest); !ok {
+			s.render.Error(w, http.StatusGone, "confirmation expired or did not match")
+			return
+		}
 	}
 	if err := os.MkdirAll(dirOf(path), 0o700); err != nil {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
@@ -71,7 +169,7 @@ func (s *Server) apiConfigInit(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.recordWebAudit("config-init", []string{path}, 0, 0)
+	s.recordWebAudit(r, "config-init", []string{path}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]string{"status": "initialized", "path": path})
 }
 

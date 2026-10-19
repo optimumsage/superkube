@@ -35,11 +35,11 @@ func PrintTable(w io.Writer, headers []string, rows [][]string) {
 	if Styled() {
 		header = HeaderBg.Render(header)
 	}
-	fmt.Fprintln(w, header)
+	_, _ = fmt.Fprintln(w, header)
 
 	// Rows.
 	for _, row := range rows {
-		fmt.Fprintln(w, formatRow(row, widths))
+		_, _ = fmt.Fprintln(w, formatRow(row, widths))
 	}
 }
 

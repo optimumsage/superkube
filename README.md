@@ -26,11 +26,11 @@ Apache-2.0 licensed. macOS + Linux (amd64 / arm64).
 curl -fsSL https://raw.githubusercontent.com/optimumsage/superkube/main/scripts/install.sh | sh
 ```
 
-Installs to `~/.local/bin` by default. Set `PREFIX=/usr/local/bin` to choose a different directory, or `VERSION=v0.3.0` to pin a release. Checksums are verified against the release's `checksums.txt` when present.
+Installs to `~/.local/bin` by default. Set `PREFIX=/usr/local/bin` to choose a different directory, or `VERSION=v1.2.0` to pin a release. Checksums are verified against the release's `checksums.txt` when present.
 
 ### From source
 
-Requires Go 1.24+.
+Requires Go 1.26+ (see `go.mod`).
 
 ```sh
 git clone https://github.com/optimumsage/superkube.git
@@ -43,9 +43,10 @@ make install   # builds superkube + sk symlink into $GOBIN
 ```sh
 sk upgrade                  # check latest release, confirm, install in place
 sk upgrade --check          # just report whether an upgrade is available
-sk upgrade --version v0.3.0 # pin a specific release
+sk upgrade --version v1.2.0 # pin a specific release
 sk upgrade --yes            # skip the confirmation prompt
 sk upgrade --force          # reinstall even if already up to date
+sk upgrade --skip-checksum  # UNSAFE: allow a release that publishes no checksums
 ```
 
 `sk upgrade` resolves the latest release from GitHub, downloads the matching `darwin`/`linux` × `amd64`/`arm64` tarball, verifies the published `checksums.txt` when present, and atomically replaces the running binary in place (resolving any `sk → superkube` symlink). The `--yes` and `--plain` global flags apply: non-TTY callers must pass `--yes`. If the install directory isn't writable you'll get a "permission denied" error pointing you at `sudo` or a fresh `install.sh` run.
@@ -96,9 +97,10 @@ By default, `superkube` will:
 - Ask you to **type the resource name** before `sk delete <kind> <name>`. Wrong name aborts.
 - Hard-block `sk delete --all` unless you pass `--yes` **and** type the literal phrase `DELETE`.
 - Run a server-side `kubectl diff` before `sk apply`, render a unified colored diff, and ask for confirmation.
-- Confirm `sk scale --replicas=0`, `sk rollout undo`, `sk drain`, and `sk cordon`.
+- Confirm `sk scale --replicas=0`, `sk rollout undo|restart|pause|resume`, `sk drain`, and `sk cordon`.
+- Check `forbid` rules (below) for **every** verb, including passthrough ones such as `patch`, `replace`, `edit`, `label`, `annotate`, `create`, and `exec`.
 
-You can bypass any prompt with `--yes`. In non-TTY environments (CI pipelines, redirected stdin), destructive commands **refuse** to run without `--yes` — never silently auto-confirm.
+A declined prompt exits with status 130. You can bypass any prompt with `--yes`. In non-TTY environments (CI pipelines, redirected stdin), destructive commands **refuse** to run without `--yes` — never silently auto-confirm.
 
 #### Context safety banner
 
@@ -133,6 +135,8 @@ When a command runs against a matching context:
 
 - The colored banner is printed to stderr before any other output.
 - Operations listed in `forbid` are **refused unconditionally** (even with `--yes`). The policy is the override, not the flag — you must edit the config to proceed.
+
+`forbid` entries are a verb followed by tokens that must all appear in the command. Matching understands resource aliases and plurals (`ns` / `namespaces`), `kind/name`, group-qualified types, and `flag=value` pairs. Policy and audit resolve against the **effective** `--context`, `--kubeconfig`, and `-n`, even when they appear after the verb. If the context is ambiguous, the policy is the **union** of all candidate contexts (fail-closed).
 
 Run `sk config init` to write a starter file with comments.
 
@@ -237,6 +241,8 @@ sk web
 ```
 
 The default opens `http://127.0.0.1:<auto-port>` in your browser. Every CLI verb has a screen — pods (live), workloads, services, nodes, **ConfigMaps / Secrets / Ingresses** (live + inline edit), logs (single, multi-pod, and AI-summarized), apply with diff preview, delete/scale/rollout/drain/cordon with the same typed-name and typed-phrase confirmations, port-forward manager, audit log viewer (filterable + follow), AI chat (`sk ai explain`), diagnose / why, config editor, and an embedded xterm.js terminal for pod exec.
+
+The browser gets the same guardrails as the CLI. Each request is pinned to the context and namespace selected in the UI, and policy, confirmation and audit all use that same snapshot. Confirmations are bound to the exact operation you previewed, and the browser can't skip them. Only `sk web --yes` can, and never for `delete --all` or forbidden operations. `require_typed_confirm` applies to apply/edit too. Saving `config.yaml` from the browser requires typing `EDIT CONFIG`. The command palette only runs read-only commands, and they're policy-checked. With `--bind 0.0.0.0`, a token is required. The token is set as an HttpOnly cookie and isn't returned by any API.
 
 #### Running as a background service
 
@@ -405,17 +411,17 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 |---|---|---|
 | `sk get <res>` | shells out; styled header + per-cell STATUS/READY/RESTARTS/AGE/TYPE coloring + per-kind summary footer on TTY; live table for `-w` on TTY; verbatim passthrough for `-o json/yaml/name/jsonpath`, pipes, redirects | none |
 | `sk describe <res>` | shells out; bolded section headings + status-aware values + colored Events/Conditions tables on TTY; verbatim passthrough off-TTY | none |
-| `sk apply -f …` | server-side dry-run → colored diff → confirm → apply | dry-run + confirm |
+| `sk apply -f …` (or `-f -` for stdin) | server-side dry-run → colored diff → confirm → apply; `--dry-run=none\|server\|client` | policy + dry-run + confirm |
 | `sk delete <res>` | typed-name confirm; `--all` requires `--yes` + typed `DELETE` phrase | typed |
-| `sk patch` / `replace` / `create` | passthrough | passthrough |
+| `sk patch` / `replace` / `create` / `edit` / `label` / `annotate` | passthrough | forbid-checked |
 | `sk logs <pod>` | shells out; on TTY, line-by-line severity / panic / HTTP-status / timestamp coloring (works in `-f` follow); `--ai` summarizes the tail; `--multi=<target>` streams many pods with colored prefix + severity highlighting | none |
-| `sk exec` / `sk port-forward` | passthrough; TTY + signals propagated; clean teardown on Ctrl-C | passthrough |
-| `sk rollout undo` | typed confirm | confirm |
-| `sk scale --replicas=0` | typed confirm when scaling to 0 | confirm |
+| `sk exec` / `sk port-forward` | passthrough; TTY + signals propagated; clean teardown on Ctrl-C | forbid-checked |
+| `sk rollout undo\|restart\|pause\|resume` | confirm (policy-checked) | policy + confirm |
+| `sk scale --replicas=0` | typed confirm when scaling to 0 | policy + confirm |
 | `sk drain <node>` | typed-name confirm | typed |
-| `sk cordon` | yes/no confirm | confirm |
-| `sk top`, `sk edit` | passthrough | none |
-| `sk <anything-else>` | verbatim passthrough — krew plugins keep working | none |
+| `sk cordon` | yes/no confirm | policy + confirm |
+| `sk top` | passthrough | none |
+| `sk <anything-else>` | verbatim passthrough — krew plugins keep working | forbid-checked |
 | `sk ctx [name\|-]` | list / switch / previous context (huh fuzzy picker on TTY) | n/a |
 | `sk ctx clean [--auto] [--preview]` | remove stale contexts: manual picker, or auto-probe `/version` and prune the unreachable ones | confirm |
 | `sk ns [name\|-]` | list / switch / previous namespace | n/a |
@@ -433,7 +439,7 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 | `sk pf start TARGET PORTS…` / `sk pf [list]` / `sk pf logs ID` / `sk pf stop ID\|all` | manage background port-forwards across shells | n/a |
 | `sk config init [--force]` / `config path` | manage `~/.config/superkube/config.yaml` | n/a |
 | `sk version` | binary, Go, platform, kubectl, AI provider versions | n/a |
-| `sk upgrade [--check\|--force\|--version v…]` | self-upgrade to the latest GitHub release; verifies checksums, atomic in-place replace | confirm |
+| `sk upgrade [--check\|--force\|--version v…\|--skip-checksum]` | self-upgrade to the latest GitHub release; requires a verified checksum (`--skip-checksum` is unsafe), atomic in-place replace | confirm |
 | `sk completion bash\|zsh\|fish` | shell completion (cobra built-in) | n/a |
 
 ---
@@ -444,7 +450,7 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 
 | Path | Purpose |
 |---|---|
-| `~/.config/superkube/config.yaml` | per-context policy (forbid, banner). Run `sk config init` to scaffold. |
+| `~/.config/superkube/config.yaml` | policy and defaults (see below). Run `sk config init` to scaffold. |
 | `${XDG_STATE_HOME:-~/.local/state}/superkube/audit.log` | append-only JSONL audit log. |
 | `${XDG_STATE_HOME:-~/.local/state}/superkube/portforward.json` | tracked active port-forwards (used by `sk pf`). |
 | `${XDG_STATE_HOME:-~/.local/state}/superkube/portforward/<id>.log` | per-forward log file. |
@@ -459,6 +465,25 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` | override the config and state directories. |
 | `KUBECONFIG` | standard kubectl override; superkube respects it. |
 
+### `config.yaml` schema
+
+```yaml
+ai:
+  provider: claude          # claude | antigravity (flag/$SUPERKUBE_AI override)
+  timeout: 90s              # any Go duration
+audit:
+  enabled: true             # --audit on|off overrides per run
+guardrails:
+  require_typed_confirm: true   # yes/no confirmations become typed phrases
+contexts:
+  "prod-*":                 # glob against the context name
+    banner: "PRODUCTION"
+    require_typed_confirm: true
+    forbid: ["delete --all", "drain", "patch"]
+```
+
+The file is parsed strictly. If it is malformed or has an unknown key, superkube prints a warning and **mutating commands refuse to run** until it is fixed (read-only commands keep working).
+
 ### Global flags
 
 ```text
@@ -467,7 +492,7 @@ See [`docs/krew.md`](docs/krew.md) for more examples and caveats.
 --kubeconfig <path>    path to kubeconfig
 --ai claude|antigravity  force AI provider (overrides auto-detect)
 --yes                  skip confirmation prompts (never bypasses policy forbids)
---dry-run auto|server|client|none
+--dry-run[=auto|server|client|none]   values need `=`; bare --dry-run means client
 --plain                disable color/TUI output
 --audit on|off         audit logging
 --no-context           AI: send only the literal prompt, no cluster data
@@ -514,6 +539,14 @@ A glob in `~/.config/superkube/config.yaml` is matching your current context. Ed
 ### `sk delete --all` is blocked even with `--yes`
 
 That's a `forbid:` entry in your config — by design, policy can't be bypassed with `--yes`. Remove the rule from `~/.config/superkube/config.yaml` to proceed, or use `kubectl delete --all` directly if you really mean it.
+
+### "config.yaml is invalid"
+
+The file has malformed YAML or an unknown key (parsing is strict). Mutating commands refuse until it is fixed; reads still work. Run `sk config path` to find the file, fix it, or move it away (`sk config init --force` rewrites a clean starter).
+
+### "put command flags after the verb"
+
+`sk -l app=web delete pods` is refused: command flags placed before the verb can't be attributed safely to the guarded command. Write `sk delete pods -l app=web` instead. Only root flags (`--context`, `-n`, `--kubeconfig`, `--yes`, …) may come first.
 
 ### Color in my terminal is wrong / pipes are getting ANSI codes
 

@@ -64,6 +64,15 @@ type Options struct {
 
 	// Repo overrides the default repo. For tests.
 	Repo string
+
+	// SkipChecksum installs even when checksums.txt (or the entry for our
+	// asset) is missing. UNSAFE: the tarball is then unauthenticated. A
+	// checksum that is present but does not match always aborts.
+	SkipChecksum bool
+
+	// Stderr receives warnings that must always be visible (default
+	// os.Stderr). Progress messages are separate and may be suppressed.
+	Stderr io.Writer
 }
 
 func (o Options) repo() string {
@@ -149,7 +158,7 @@ func Run(ctx context.Context, p *Plan, opt Options, progress func(string)) error
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpdir)
+	defer func() { _ = os.RemoveAll(tmpdir) }()
 
 	progress("downloading " + p.AssetName)
 	tarPath := filepath.Join(tmpdir, p.AssetName)
@@ -159,12 +168,21 @@ func Run(ctx context.Context, p *Plan, opt Options, progress func(string)) error
 
 	progress("verifying checksum")
 	if err := verifyAgainstChecksumsURL(ctx, opt.HTTPClient, p.ChecksumURL, tarPath, p.AssetName); err != nil {
-		// Snapshot / pre-release builds may not publish checksums. Mirror
-		// install.sh's "best-effort" behavior: warn, but continue.
-		if !errors.Is(err, errNoChecksumPublished) {
+		// A missing checksums.txt / entry is a hard error: installing an
+		// unverified binary over the running one is not something to do
+		// silently. --skip-checksum is the explicit escape hatch (e.g. for
+		// snapshot builds). Mismatches and fetch errors are never skippable.
+		if !opt.SkipChecksum || !errors.Is(err, errNoChecksumPublished) {
+			if errors.Is(err, errNoChecksumPublished) {
+				return fmt.Errorf("checksum verification: %w for %s (re-run with --skip-checksum to install unverified; UNSAFE)", err, p.AssetName)
+			}
 			return fmt.Errorf("checksum verification: %w", err)
 		}
-		progress("warning: no checksums.txt published — skipping verification")
+		w := opt.Stderr
+		if w == nil {
+			w = os.Stderr
+		}
+		_, _ = fmt.Fprintln(w, "warning: no checksum available — installing UNVERIFIED binary (--skip-checksum)")
 	}
 
 	progress("extracting")

@@ -36,15 +36,36 @@ func (s *Server) wsExec(w http.ResponseWriter, r *http.Request) {
 	cols := atoi(r.URL.Query().Get("cols"), 120)
 	rows := atoi(r.URL.Query().Get("rows"), 30)
 
+	if badToken(pod, ns) || (container != "" && badToken(container)) {
+		s.render.Error(w, http.StatusBadRequest, "invalid pod, namespace or container")
+		return
+	}
+
+	// Policy first, before the upgrade: exec is a shell in a production pod,
+	// so `forbid: [exec]` rules (and an unreadable config) must stop it with a
+	// plain HTTP response the client can read.
+	sess := s.readSession(r)
+	policyArgs := []string{pod, "-n", ns}
+	if container != "" {
+		policyArgs = append(policyArgs, "-c", container)
+	}
+	if s.gateForbidden(w, sess, "exec", policyArgs) {
+		return
+	}
+	if s.deps.Runner == nil {
+		s.render.Error(w, http.StatusServiceUnavailable, "kubectl runner unavailable")
+		return
+	}
+
+	clearStreamDeadlines(w) // GET upgrade: no request body to wait for
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: s.allowedOrigins(),
+		OriginPatterns: s.originPatterns(),
 	})
 	if err != nil {
 		return
 	}
-	defer conn.Close(websocket.StatusInternalError, "")
+	defer func() { _ = conn.Close(websocket.StatusInternalError, "") }()
 
-	sess := s.readSession(r)
 	args := []string{"exec", "-it", pod, "-n", ns}
 	if container != "" {
 		args = append(args, "-c", container)
@@ -55,16 +76,16 @@ func (s *Server) wsExec(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, kubectlPath(s), args...)
+	cmd := exec.CommandContext(ctx, s.deps.Runner.Path, args...)
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
 		sendExit(ctx, conn, "could not start exec: "+err.Error())
 		return
 	}
-	defer ptmx.Close()
+	defer func() { _ = ptmx.Close() }()
 
 	start := time.Now()
-	s.recordWebAudit("exec", []string{pod}, 0, 0)
+	s.recordWebAudit(r, "exec", append([]string{pod, "-n", ns}, execAuditExtra(container)...), 0, 0)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -124,27 +145,19 @@ func (s *Server) wsExec(w http.ResponseWriter, r *http.Request) {
 	}()
 	wg.Wait()
 	_ = cmd.Wait()
-	s.recordWebAudit("exec-end", []string{pod}, 0, time.Since(start))
+	s.recordWebAudit(r, "exec-end", append([]string{pod, "-n", ns}, execAuditExtra(container)...), 0, time.Since(start))
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 }
 
-// allowedOrigins enumerates the Origin values we accept for the exec WS.
-// Default: only same-origin (the URL the user opened).
-func (s *Server) allowedOrigins() []string {
-	out := []string{}
-	for _, h := range s.allowedHosts() {
-		out = append(out, h)
-		if s.addr != "" {
-			port := s.addr[strings.LastIndex(s.addr, ":")+1:]
-			out = append(out, h+":"+port)
-		}
+// execAuditExtra returns the optional container args for the audit argv. The
+// shell command itself is not recorded: it is interactive, and the typed
+// session content is not available server-side without logging keystrokes.
+func execAuditExtra(container string) []string {
+	if container == "" {
+		return nil
 	}
-	return out
+	return []string{"-c", container}
 }
-
-// kubectlPath returns the user's kubectl executable. The runner has already
-// validated kubectl is on PATH at startup, so a bare "kubectl" works.
-func kubectlPath(_ *Server) string { return "kubectl" }
 
 // sendExit emits the final exit frame. We swallow errors — the connection
 // may already be torn down.

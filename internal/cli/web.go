@@ -5,7 +5,6 @@ import (
 
 	"github.com/optimumsage/superkube/internal/ai"
 	"github.com/optimumsage/superkube/internal/audit"
-	"github.com/optimumsage/superkube/internal/guardrail"
 	"github.com/optimumsage/superkube/internal/helm"
 	"github.com/optimumsage/superkube/internal/kube"
 	"github.com/optimumsage/superkube/internal/kubectl"
@@ -31,7 +30,6 @@ Defaults bind to 127.0.0.1 with no auth — safe for a personal kube tool. Use
 --bind 0.0.0.0 only on trusted networks; a token is auto-generated unless you
 pass --token explicitly.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			provider, _ := ai.Detect(Flags.AIProvider)
 			runner, err := kubectl.Default()
 			if err != nil {
 				return err
@@ -47,8 +45,8 @@ pass --token explicitly.`,
 				Loader:     loader,
 				Runner:     runner,
 				Helm:       helmR,
-				Policy:     func() guardrail.Policy { return Policy() },
-				Banner:     ActiveBanner,
+				PolicyFor:  webPolicyFor,
+				BannerFor:  webBannerFor,
 				Audit:      audit.Record,
 				AIProvider: func() (ai.Provider, error) { return ai.Detect(Flags.AIProvider) },
 				Context:    Flags.Context,
@@ -57,7 +55,6 @@ pass --token explicitly.`,
 				NoContext:  Flags.NoContext,
 				Yes:        Flags.Yes,
 			}
-			_ = provider
 			srv, err := web.New(web.Config{
 				Bind: bind, Port: port, Token: token, NoOpen: noOpen,
 			}, deps)

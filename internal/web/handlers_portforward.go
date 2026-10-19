@@ -2,7 +2,6 @@ package web
 
 import (
 	"bufio"
-	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -42,13 +41,32 @@ func (s *Server) apiPFStart(w http.ResponseWriter, r *http.Request) {
 		Namespace string   `json:"namespace"`
 		Address   string   `json:"address"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Target == "" || len(body.Ports) == 0 {
+	if err := s.decodeJSON(w, r, &body); err != nil || body.Target == "" || len(body.Ports) == 0 {
 		s.render.Error(w, http.StatusBadRequest, "target + ports required")
 		return
 	}
 	sess := s.readSession(r)
+	if !validPortForwardTarget(body.Target) || !validPFAddress(body.Address) || optBad(body.Namespace) {
+		s.render.Error(w, http.StatusBadRequest, "invalid target, namespace or address")
+		return
+	}
+	for _, p := range body.Ports {
+		if !validPortSpec(p) {
+			s.render.Error(w, http.StatusBadRequest, "invalid port spec "+p)
+			return
+		}
+	}
 	if body.Namespace == "" {
 		body.Namespace = sess.Namespace
+	}
+	// Policy sees the complete effective argv, including -n and --address.
+	pfArgs := append([]string{body.Target}, body.Ports...)
+	pfArgs = append(pfArgs, "-n", body.Namespace)
+	if body.Address != "" {
+		pfArgs = append(pfArgs, "--address", body.Address)
+	}
+	if s.gateForbidden(w, sess, "port-forward", pfArgs) {
+		return
 	}
 	e, err := portforward.Start(portforward.StartOpts{
 		Target:     body.Target,
@@ -62,7 +80,7 @@ func (s *Server) apiPFStart(w http.ResponseWriter, r *http.Request) {
 		s.render.Error(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	s.recordWebAudit("pf-start", []string{body.Target}, 0, 0)
+	s.recordWebAudit(r, "pf-start", []string{body.Target}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]any{
 		"id": e.ID, "pid": e.PID, "log_path": e.LogPath,
 	})
@@ -71,12 +89,20 @@ func (s *Server) apiPFStart(w http.ResponseWriter, r *http.Request) {
 // apiPFStop terminates a forward by id (or "all").
 func (s *Server) apiPFStop(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Stop may return stopped entries together with an error (some forwards
+	// died, others did not): always audit what was stopped, then report.
 	stopped, err := portforward.Stop(id)
+	if len(stopped) > 0 || err == nil {
+		code := 0
+		if err != nil {
+			code = 1
+		}
+		s.recordWebAudit(r, "pf-stop", []string{id, "stopped=" + itoa64(int64(len(stopped)))}, code, 0)
+	}
 	if err != nil {
-		s.render.Error(w, http.StatusInternalServerError, err.Error())
+		s.render.JSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "stopped": len(stopped)})
 		return
 	}
-	s.recordWebAudit("pf-stop", []string{id}, 0, 0)
 	s.render.JSON(w, http.StatusOK, map[string]any{"stopped": len(stopped)})
 }
 
@@ -106,7 +132,7 @@ func (s *Server) streamPFLogs(w http.ResponseWriter, r *http.Request) {
 		_ = sse.Send("error", map[string]string{"message": err.Error()})
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Initial dump.
 	sc := bufio.NewScanner(f)

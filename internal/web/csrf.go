@@ -2,6 +2,7 @@ package web
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
 	"sync"
@@ -13,29 +14,58 @@ import (
 // static/index.html for the wiring).
 const csrfCookieName = "sk_csrf"
 
-// csrfStore tracks active CSRF tokens. We accept any cookie value we have
-// previously issued; the cookie itself is the secret, the store is just there
-// so handlers can render a fresh token into the page.
+// csrfTTL is how long an issued CSRF value stays valid without being used.
+const csrfTTL = 12 * time.Hour
+
+// csrfStore tracks the CSRF tokens this server instance has issued. A cookie
+// value is only honoured if it is in the store: cookies are not port-isolated,
+// so any other web server on localhost can plant `sk_csrf=<its choice>` in the
+// browser and then send a matching header. Requiring server-issued values
+// defeats that cookie-planting attack.
 type csrfStore struct {
 	mu     sync.Mutex
-	issued map[string]time.Time
+	issued map[string]time.Time // token -> last use
+	ttl    time.Duration
+	// lastSweep rate-limits the O(N) expiry sweep.
+	lastSweep time.Time
 }
+
+// maxCSRFTokens bounds memory: every cookie-less request to /api/v1/info
+// would otherwise mint (and retain) a token.
+const maxCSRFTokens = 1024
 
 func newCSRFStore() *csrfStore {
-	return &csrfStore{issued: make(map[string]time.Time)}
+	return &csrfStore{issued: make(map[string]time.Time), ttl: csrfTTL}
 }
 
-// ensureCookie returns the request's CSRF token, issuing a new cookie if the
-// client didn't carry one yet. The HttpOnly bit is intentionally false: HTMX
-// reads the cookie via document.cookie to populate the X-CSRF-Token header.
+// ensureCookie returns the request's CSRF token if it is one we issued and is
+// still fresh; otherwise it mints a new one and overwrites the cookie. The
+// HttpOnly bit is intentionally false: the UI reads the cookie via
+// document.cookie to populate the X-CSRF-Token header.
 func (s *csrfStore) ensureCookie(w http.ResponseWriter, r *http.Request) string {
-	if c, err := r.Cookie(csrfCookieName); err == nil && c.Value != "" {
-		s.touch(c.Value)
+	if c, err := r.Cookie(csrfCookieName); err == nil && s.valid(c.Value) {
 		return c.Value
 	}
 	tok := mintToken()
 	s.mu.Lock()
-	s.issued[tok] = time.Now()
+	now := time.Now()
+	// Sweep at most once a minute (not on every request), then enforce the
+	// hard cap by evicting the least recently used entry.
+	if now.Sub(s.lastSweep) > time.Minute {
+		s.sweepLocked(now)
+		s.lastSweep = now
+	}
+	for len(s.issued) >= maxCSRFTokens {
+		var oldest string
+		var oldestAt time.Time
+		for t, at := range s.issued {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = t, at
+			}
+		}
+		delete(s.issued, oldest)
+	}
+	s.issued[tok] = now
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name:     csrfCookieName,
@@ -46,15 +76,37 @@ func (s *csrfStore) ensureCookie(w http.ResponseWriter, r *http.Request) string 
 	return tok
 }
 
-func (s *csrfStore) touch(tok string) {
+// valid reports whether tok was issued by this server and has not expired,
+// refreshing its last-use time when it has not.
+func (s *csrfStore) valid(tok string) bool {
+	if tok == "" {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.issued[tok]; ok {
-		s.issued[tok] = time.Now()
-	} else {
-		// Cookie predates this server run; accept it and adopt it.
-		s.issued[tok] = time.Now()
+	last, ok := s.issued[tok]
+	if !ok {
+		return false
 	}
+	if time.Since(last) > s.ttl {
+		delete(s.issued, tok)
+		return false
+	}
+	s.issued[tok] = time.Now()
+	return true
+}
+
+func (s *csrfStore) sweepLocked(now time.Time) {
+	for tok, last := range s.issued {
+		if now.Sub(last) > s.ttl {
+			delete(s.issued, tok)
+		}
+	}
+}
+
+// matches reports whether header equals cookie in constant time.
+func csrfMatches(cookie, header string) bool {
+	return subtle.ConstantTimeCompare([]byte(cookie), []byte(header)) == 1
 }
 
 func mintToken() string {

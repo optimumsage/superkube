@@ -48,13 +48,8 @@ type Event struct {
 
 // Record appends one event to the audit log. Best-effort: any error is logged
 // to stderr at -v level but never propagated, because a logging failure must
-// not break the user's command. Honors `--audit=off` via the Disabled flag.
-var Disabled bool
-
+// not break the user's command.
 func Record(e Event) {
-	if Disabled {
-		return
-	}
 	if e.Schema == 0 {
 		e.Schema = schemaVersion
 	}
@@ -99,12 +94,12 @@ func appendLine(path string, b []byte) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		return fmt.Errorf("flock %s: %w", path, err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 
 	if _, err := f.Write(b); err != nil {
 		return err
@@ -122,30 +117,50 @@ func newID() string {
 	return fmt.Sprintf("%012x-%s", t, hex.EncodeToString(tail))
 }
 
+// secretFlags are the flags whose value is a credential. Both `--flag=value`
+// and `--flag value` spellings are masked. Flags whose value is a file path
+// (--client-key, --kubeconfig) or a non-secret identity (--username) are kept.
+var secretFlags = []string{"--from-literal", "--token", "--password", "--docker-password"}
+
 // redactArgv masks the value portion of secret-bearing kubectl flags:
-// --from-literal=KEY=VALUE → --from-literal=KEY=<redacted>. Tokens that look
-// like JWTs are also masked, in case the user pasted one as a positional arg
-// (e.g. `kubectl get --token=eyJ...`). The output slice is fresh; the input
-// is not mutated.
+// --from-literal=KEY=VALUE → --from-literal=KEY=<redacted>, and the
+// space-separated forms. Tokens that look like JWTs are also masked, in case
+// the user pasted one as a positional arg. The output slice is fresh; the
+// input is not mutated (it is still the argv that gets executed).
 func redactArgv(in []string) []string {
 	out := make([]string, len(in))
+	pending := "" // secret flag whose value is the next element
 	for i, a := range in {
+		if pending != "" {
+			out[i] = redactFlagValue(pending, a)
+			pending = ""
+			continue
+		}
 		out[i] = redactToken(a)
+		for _, f := range secretFlags {
+			if a == f {
+				pending = f
+			}
+		}
 	}
 	return out
 }
 
+// redactFlagValue masks v, the value of secret flag f. --from-literal values
+// are KEY=VALUE; the key is kept.
+func redactFlagValue(f, v string) string {
+	if f == "--from-literal" {
+		if eq := strings.IndexByte(v, '='); eq >= 0 {
+			return v[:eq] + "=<redacted>"
+		}
+	}
+	return "<redacted>"
+}
+
 func redactToken(s string) string {
-	for _, prefix := range []string{"--from-literal=", "--token="} {
-		if strings.HasPrefix(s, prefix) {
-			rest := s[len(prefix):]
-			// --from-literal is KEY=VALUE; keep the key.
-			if prefix == "--from-literal=" {
-				if eq := strings.IndexByte(rest, '='); eq >= 0 {
-					return prefix + rest[:eq] + "=<redacted>"
-				}
-			}
-			return prefix + "<redacted>"
+	for _, f := range secretFlags {
+		if strings.HasPrefix(s, f+"=") {
+			return f + "=" + redactFlagValue(f, s[len(f)+1:])
 		}
 	}
 	// JWT detection: three base64ish segments joined by dots, leading "eyJ".

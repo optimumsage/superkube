@@ -17,8 +17,8 @@ import (
 )
 
 // errNoChecksumPublished is sentinel: the release exists but no checksums.txt
-// was uploaded. We treat this the same way install.sh does — warn and
-// continue. Wrapped errors are still surfaced as hard failures.
+// was uploaded (or it lists no entry for our asset). This is a hard failure
+// unless the user passes --skip-checksum; see Run.
 var errNoChecksumPublished = errors.New("no checksums.txt published")
 
 // download streams a URL into dest. It does NOT buffer the whole body in
@@ -52,7 +52,8 @@ func download(ctx context.Context, h httpDoer, url, dest string) error {
 // verifyAgainstChecksumsURL fetches the checksums.txt for the release and
 // compares the entry for assetName against the sha256 of file. Returns
 // errNoChecksumPublished if the checksum file itself is absent (release just
-// missing the artifact) so callers can downgrade to a warning.
+// missing the artifact) or lists no entry for assetName; callers treat that as
+// fatal unless the user passed --skip-checksum.
 func verifyAgainstChecksumsURL(ctx context.Context, h httpDoer, url, file, assetName string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -75,8 +76,7 @@ func verifyAgainstChecksumsURL(ctx context.Context, h httpDoer, url, file, asset
 		return err
 	}
 	if expected == "" {
-		// File present but doesn't list our asset. install.sh treats this as
-		// a warning, not an error.
+		// File present but doesn't list our asset.
 		return errNoChecksumPublished
 	}
 	actual, err := sha256File(file)
@@ -119,7 +119,7 @@ func sha256File(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
@@ -136,12 +136,12 @@ func extractBinary(tarballPath, entryName, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return fmt.Errorf("gzip open: %w", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
@@ -225,7 +225,7 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err
