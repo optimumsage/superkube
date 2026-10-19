@@ -213,6 +213,14 @@ func ruleTokens(verb string, fields []string) []token {
 				// The first positional (past a rollout-style subcommand) is
 				// the resource TYPE slot; later ones are NAMES.
 				typeSeen = true
+				if strings.Contains(w, ",") {
+					// A comma list is several independent requirements,
+					// matching how argTokens indexes each listed type.
+					for _, part := range strings.Split(w, ",") {
+						out = append(out, token{word: part, norm: normalizeKind(part)})
+					}
+					continue
+				}
 				t.norm = normalizeTypeWord(w)
 			}
 			out = append(out, t)
