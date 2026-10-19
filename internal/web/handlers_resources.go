@@ -142,6 +142,10 @@ func (s *Server) apiResourceYAML(w http.ResponseWriter, r *http.Request) {
 		s.apiSecretYAMLRevealed(w, r)
 		return
 	}
+	if isSecretKind(kind) && r.URL.Query().Get("edit") == "1" {
+		s.apiSecretYAMLForEdit(w, r)
+		return
+	}
 	var mask func(string) string
 	if isSecretKind(kind) {
 		mask = secretyaml.Mask // unrevealed Secret YAML must never carry live values

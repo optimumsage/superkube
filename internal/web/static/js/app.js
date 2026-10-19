@@ -469,7 +469,9 @@
       async reloadYAML() {
         try {
           let url = '/api/v1/resources/' + this.kind + '/' + this.ns + '/' + this.name + '/yaml';
-          if (this.isSecret && this.reveal) url += '?reveal=1';
+          // The editable buffer needs the raw manifest: the plain endpoint is
+          // masked for viewing and masked placeholders must never be submitted.
+          if (this.isSecret) url += this.reveal ? '?reveal=1' : '?edit=1';
           const r = await fetch(url);
           this.yaml = await r.text();
         } catch (e) {
