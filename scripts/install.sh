@@ -7,7 +7,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/optimumsage/superkube/main/scripts/install.sh | sh
 #   PREFIX=/usr/local/bin curl -fsSL .../install.sh | sh
-#   VERSION=v0.2.1 curl -fsSL .../install.sh | sh
+#   VERSION=v1.2.0 curl -fsSL .../install.sh | sh
 
 set -eu
 

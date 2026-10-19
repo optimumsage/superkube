@@ -9,7 +9,7 @@ When you run `sk foo …`, superkube's command router (`internal/cli/root.go`) c
 Two consequences worth knowing:
 
 - **The audit log records the plugin verb.** `sk neat -f deploy.yaml` appears as `verb: "neat"` in `~/.local/state/superkube/audit.log` — convenient for tracing which plugin a noisy session was using.
-- **Plugins don't go through superkube guardrails.** If a plugin deletes objects internally, superkube doesn't intercept; the plugin is fully trusted. Confirmation, dry-run preview, and per-context `forbid:` policy apply only to the verbs superkube owns. If you want a guardrail on a plugin, file an issue.
+- **Plugins aren't confirmed or previewed.** If a plugin deletes objects internally, superkube doesn't intercept; the plugin is fully trusted. Confirmation prompts and dry-run previews apply only to the verbs superkube owns. Per-context `forbid:` rules, however, apply to any verb, including plugin verbs, so a rule like `forbid: ["tree"]` blocks that plugin in matching contexts.
 
 ## Examples
 
@@ -24,7 +24,7 @@ sk get deployment web -o yaml | sk neat
 
 ### `sk tree` — owner-graph visualizer
 
-[`kubectl-tree`](https://github.com/ahmetb/kubectl-tree) prints the ownership graph for a resource — Deployment → ReplicaSet → Pod, or Service → EndpointSlice, etc. Pairs nicely with `sk diagnose`, which now ships its own owner-chain in v0.3 (see the [diagnose section in the README](../README.md#ai-integration)).
+[`kubectl-tree`](https://github.com/ahmetb/kubectl-tree) prints the ownership graph for a resource — Deployment → ReplicaSet → Pod, or Service → EndpointSlice, etc. Pairs nicely with `sk diagnose`, which ships its own owner-chain (see the [AI assistance section in the README](../README.md#ai-assistance)).
 
 ```sh
 kubectl krew install tree
