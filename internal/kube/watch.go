@@ -176,7 +176,19 @@ func (l Loader) WatchTable(ctx context.Context, opts WatchTableOpts, render func
 	})
 	defer stopRefresher()
 
-	backoff := time.Second
+	return listWatchLoop(ctx, fetch, watcher, kick, time.Second)
+}
+
+// listWatchLoop re-lists (fetch) and watches from the returned resourceVersion
+// until ctx ends or a non-recoverable error occurs.
+//
+// client-go's RetryWatcher retries an establishment-time 410 Gone /
+// ResourceExpired from WatchWithContext forever with the same (stale)
+// resourceVersion, so it never closes its channel and a plain re-list loop
+// would freeze silently. watchOnce therefore wraps the watcher, captures that
+// error, and cancels the RetryWatcher's context so we fall through to a re-list
+// with a fresh resourceVersion.
+func listWatchLoop(ctx context.Context, fetch func(context.Context) (string, error), watcher cache.WatcherWithContext, kick func(), backoff time.Duration) error {
 	for {
 		rv, err := fetch(ctx)
 		if err != nil {
@@ -185,14 +197,12 @@ func (l Loader) WatchTable(ctx context.Context, opts WatchTableOpts, render func
 			}
 			return err
 		}
-		rw, err := toolswatch.NewRetryWatcherWithContext(ctx, rv, watcher)
+		fatal, err := watchOnce(ctx, rv, watcher, kick)
 		if err != nil {
 			// Empty/"0" resourceVersion (some aggregated APIs): nothing to
 			// resume from.
 			return err
 		}
-		fatal := pumpWatch(ctx, rw, kick)
-		rw.Stop()
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -211,6 +221,27 @@ func (l Loader) WatchTable(ctx context.Context, opts WatchTableOpts, render func
 			backoff *= 2
 		}
 	}
+}
+
+// watchOnce runs one RetryWatcher cycle from rv. It returns (fatal, nil) when
+// the cycle ended (fatal non-nil only for errors a re-list cannot fix), or
+// (nil, err) when the RetryWatcher could not be created.
+func watchOnce(ctx context.Context, rv string, watcher cache.WatcherWithContext, kick func()) (fatal, err error) {
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	guarded := watcherFunc(func(c context.Context, o metav1.ListOptions) (apiwatch.Interface, error) {
+		w, werr := watcher.WatchWithContext(c, o)
+		if werr != nil && (apierrors.IsGone(werr) || apierrors.IsResourceExpired(werr)) {
+			cancel() // stop RetryWatcher's endless same-RV retry; caller re-lists
+		}
+		return w, werr
+	})
+	rw, err := toolswatch.NewRetryWatcherWithContext(wctx, rv, guarded)
+	if err != nil {
+		return nil, err
+	}
+	defer rw.Stop()
+	return pumpWatch(wctx, rw, kick), nil
 }
 
 // startRefresher runs do on a single goroutine, at most once per debounce
