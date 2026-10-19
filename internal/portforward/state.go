@@ -178,13 +178,18 @@ func Remove(id string) (removed []Entry, err error) {
 	return removed, err
 }
 
+// identifyProc is identify behind a variable so tests can give the two
+// identity checks in Stop differing outcomes.
+var identifyProc = identify
+
 // Stop terminates the entries with the given id ("all" matches everything).
 // The id is matched first, then each entry's process identity is checked:
-// owned processes are signalled and removed; confirmed-stale entries (process
-// gone, or PID reused by something else) are removed without signalling;
-// entries whose identity could not be verified are left in the state file,
-// not signalled, and reported in the returned error. The returned slice holds
-// the entries that were removed.
+// confirmed-stale entries (process gone, or PID reused by something else) are
+// removed without signalling; owned processes are signalled, and their entry
+// is removed only once termination (or that the process is gone) is
+// confirmed; entries whose identity could not be verified, at either check,
+// stay in the state file, are not signalled, and are reported in the returned
+// error. The returned slice holds the entries that were removed.
 func Stop(id string) (stopped []Entry, err error) {
 	var unknown []string
 	var toKill []Entry
@@ -202,11 +207,10 @@ func Stop(id string) (stopped []Entry, err error) {
 				kept = append(kept, e)
 				continue
 			}
-			switch identify(e) {
+			switch identifyProc(e) {
 			case identOwned:
-				toKill = append(toKill, e)
-				stopped = append(stopped, e)
-				changed = true
+				toKill = append(toKill, e) // stays in state until confirmed
+				kept = append(kept, e)
 			case identStale:
 				stopped = append(stopped, e)
 				changed = true
@@ -220,15 +224,55 @@ func Stop(id string) (stopped []Entry, err error) {
 		}
 		return writeLocked(kept)
 	})
+	if err != nil {
+		return stopped, err
+	}
+	var confirmed []Entry
 	for _, e := range toKill {
 		// Re-verify right before signalling; the PID could have been reused
 		// while we were unlocked.
-		if identify(e) == identOwned {
+		switch identifyProc(e) {
+		case identOwned:
 			_ = Kill(e.PID)
+			if isAlive(e.PID) {
+				unknown = append(unknown, fmt.Sprintf("%s (pid %d, still running after signal)", e.ID, e.PID))
+				continue
+			}
+			confirmed = append(confirmed, e)
+		case identStale:
+			confirmed = append(confirmed, e)
+		default:
+			unknown = append(unknown, fmt.Sprintf("%s (pid %d)", e.ID, e.PID))
 		}
 	}
-	if err == nil && len(unknown) > 0 {
-		err = fmt.Errorf("could not verify process identity for %s; not signalled and left in the state file (is `ps` available?)", strings.Join(unknown, ", "))
+	if len(confirmed) > 0 {
+		rerr := withLock(func() error {
+			current, err := readEntries()
+			if err != nil {
+				return err
+			}
+			kept := current[:0]
+			for _, e := range current {
+				drop := false
+				for _, c := range confirmed {
+					if c.ID == e.ID && c.PID == e.PID {
+						drop = true
+						break
+					}
+				}
+				if !drop {
+					kept = append(kept, e)
+				}
+			}
+			return writeLocked(kept)
+		})
+		if rerr != nil {
+			return stopped, rerr
+		}
+		stopped = append(stopped, confirmed...)
+	}
+	if len(unknown) > 0 {
+		err = fmt.Errorf("could not verify or terminate %s; not removed from the state file (is `ps` available?)", strings.Join(unknown, ", "))
 	}
 	return stopped, err
 }
