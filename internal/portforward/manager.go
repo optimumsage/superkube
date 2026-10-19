@@ -138,7 +138,20 @@ func Kill(pid int) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return proc.Signal(syscall.SIGKILL)
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		return err
+	}
+	// SIGKILL is asynchronous: give the kernel a moment to tear the process
+	// down so callers that re-check liveness don't report a successful kill
+	// as "still running".
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !isAlive(pid) {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil
 }
 
 // buildKubectlArgs assembles the argv we hand to `kubectl port-forward`. We
