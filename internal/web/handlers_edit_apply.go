@@ -24,9 +24,10 @@ var canonicalEditKind = map[string]string{
 
 // manifestDoc is the identity of one YAML document in a submission.
 type manifestDoc struct {
-	Kind      string
-	Name      string
-	Namespace string
+	APIVersion string
+	Kind       string
+	Name       string
+	Namespace  string
 }
 
 // parseManifestDocs splits yamlText exactly the way kubectl does (the
@@ -46,7 +47,7 @@ func parseManifestDocs(yamlText string) ([]manifestDoc, error) {
 		if len(raw) == 0 {
 			continue // empty / comment-only document
 		}
-		if err := collectManifestDocs(raw, 0, &docs); err != nil {
+		if err := collectManifestDocs(raw, 0, "", "", &docs); err != nil {
 			return nil, err
 		}
 	}
@@ -57,8 +58,19 @@ const maxListDepth = 8
 // collectManifestDocs appends the identity of obj. A `kind: List` / `*List`
 // document is unpacked recursively (kubectl applies its items, not the List),
 // so forbid rules cannot be dodged by wrapping an object in a List.
-func collectManifestDocs(obj map[string]any, depth int, out *[]manifestDoc) error {
+//
+// A typed list (`kind: SecretList`) may omit kind/apiVersion on its items;
+// kubectl infers the item kind from the parent, so inheritKind/inheritAPI carry
+// `SecretList` -> `Secret` and the parent's apiVersion down to bare items.
+func collectManifestDocs(obj map[string]any, depth int, inheritKind, inheritAPI string, out *[]manifestDoc) error {
 	kind, _ := obj["kind"].(string)
+	apiVersion, _ := obj["apiVersion"].(string)
+	if kind == "" {
+		kind = inheritKind
+	}
+	if apiVersion == "" {
+		apiVersion = inheritAPI
+	}
 	if kind == "List" || strings.HasSuffix(kind, "List") {
 		if depth >= maxListDepth {
 			return errors.New("invalid YAML: lists nested too deeply")
@@ -74,7 +86,11 @@ func collectManifestDocs(obj map[string]any, depth int, out *[]manifestDoc) erro
 				if !ok {
 					return errors.New("invalid YAML: List item must be an object")
 				}
-				if err := collectManifestDocs(m, depth+1, out); err != nil {
+				itemKind := ""
+				if kind != "List" {
+					itemKind = strings.TrimSuffix(kind, "List")
+				}
+				if err := collectManifestDocs(m, depth+1, itemKind, apiVersion, out); err != nil {
 					return err
 				}
 			}
@@ -84,7 +100,7 @@ func collectManifestDocs(obj map[string]any, depth int, out *[]manifestDoc) erro
 	md, _ := obj["metadata"].(map[string]any)
 	name, _ := md["name"].(string)
 	ns, _ := md["namespace"].(string)
-	*out = append(*out, manifestDoc{Kind: kind, Name: name, Namespace: ns})
+	*out = append(*out, manifestDoc{APIVersion: apiVersion, Kind: kind, Name: name, Namespace: ns})
 	return nil
 }
 

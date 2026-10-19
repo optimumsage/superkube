@@ -59,6 +59,37 @@ func (s *Server) fragResourceEdit(w http.ResponseWriter, r *http.Request) {
 // site uses (session cookie + CSRF for mutations; the bind/token model for
 // non-loopback access). The web UI's threat model is "trusted local user";
 // reveal still gets recorded in the audit log.
+// apiSecretYAMLForEdit returns the Secret's RAW (unmasked, still base64) YAML
+// for the resource editor's buffer. The masked view would otherwise be
+// submitted back with placeholders. It is gated like an edit and audited.
+func (s *Server) apiSecretYAMLForEdit(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("ns")
+	name := r.PathValue("name")
+	if s.badInput(w, ns, name) {
+		return
+	}
+	sess := s.readSession(r)
+	args := []string{"secrets", name, "secret", "Secret", "secret/" + name, "-n", ns}
+	if s.gateForbidden(w, sess, "edit", args) {
+		return
+	}
+	full := sess.prependGlobalFlagsNoNS([]string{"get", "secret", name, "-n", ns, "-o", "yaml"})
+	var buf bytes.Buffer
+	start := time.Now()
+	err := s.deps.Runner.Run(r.Context(), full, kubectl.RunOpts{Stdout: &buf, Stderr: &buf})
+	exitCode := 0
+	if err != nil {
+		exitCode = exitCodeOf(err)
+	}
+	s.recordWebAudit(r, "secret-edit-load", []string{ns + "/" + name}, exitCode, time.Since(start))
+	if err != nil && exitCode != 0 && buf.Len() == 0 {
+		s.render.Error(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(buf.Bytes())
+}
+
 func (s *Server) apiSecretYAMLRevealed(w http.ResponseWriter, r *http.Request) {
 	ns := r.PathValue("ns")
 	name := r.PathValue("name")
